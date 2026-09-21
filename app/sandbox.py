@@ -221,10 +221,14 @@ class RunResult:
     hint: str = ""
 
 
-def _hint_for(*, timed_out: bool, mem_killed: bool, exit_code: int | None, truncated: bool) -> str:
+def _hint_for(
+    *, timed_out: bool, mem_killed: bool, exit_code: int | None, truncated: bool
+) -> str:
     """把"为什么没跑出来"翻译成人话，学习者不用自己猜退出码。"""
     if mem_killed:
-        return "常驻内存超上限，被父进程看门狗杀掉（macOS 不执行 RLIMIT_AS，只能靠这里兜）"
+        return (
+            "常驻内存超上限，被父进程看门狗杀掉（macOS 不执行 RLIMIT_AS，只能靠这里兜）"
+        )
     if timed_out:
         return "墙钟超时被终止：大概率卡在 sleep、等网络或死循环"
     if exit_code == -signal.SIGXCPU:
@@ -379,7 +383,9 @@ def _tree_rss(proc: psutil.Process) -> int:
     return total
 
 
-def _supervise(proc: subprocess.Popen, s: Settings) -> tuple[int | None, bool, bool, int]:
+def _supervise(
+    proc: subprocess.Popen, s: Settings
+) -> tuple[int | None, bool, bool, int]:
     """盯住子进程，返回 (退出码, 墙钟超时?, 内存超限?, 峰值RSS字节)。
 
     为什么不用 proc.wait(timeout=) 一把梭：那样只能管到墙钟，管不到内存。
@@ -423,6 +429,7 @@ def _kill_group(pid: int) -> None:
         os.killpg(os.getpgid(pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass  # 进程已经自己退出
+
 
 async def run_python(
     code: str,

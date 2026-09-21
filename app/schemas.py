@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_serializer,
+    field_validator,
+)
 
 
 class LineNoteOut(BaseModel):
@@ -41,16 +49,41 @@ class ApiCardOut(BaseModel):
         return value or []
 
 
+class ConceptOut(BaseModel):
+    """系统性讲解：章级的基础概念，或例级的模块功能介绍。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    title: str
+    body: str = ""
+    kind: Literal["base", "arch", "flow", "compare"] = "base"
+    order: int = 0
+
+
 class ExampleBrief(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     uid: str
     order: int
     caption: str
+    title: str = ""
     lang: str
     runnable: bool
     line_count: int
     probe_status: str | None = None
+
+    @computed_field
+    @property
+    def display_no(self) -> str:
+        """ch07ex02 → 7-2，比裸 uid 好读。"""
+        m = re.match(r"ch(\d+)ex(\d+)", self.uid)
+        return f"{int(m.group(1))}-{int(m.group(2))}" if m else self.uid
+
+    @computed_field
+    @property
+    def display_name(self) -> str:
+        """优先人工中文标题，其次教程里的文件名标签。"""
+        return self.title or self.caption or f"例子 {self.order}"
 
 
 class ExampleOut(BaseModel):
@@ -59,7 +92,8 @@ class ExampleOut(BaseModel):
     uid: str
     order: int
     caption: str
-    heading: str
+    title: str = ""
+    heading: str = ""
     lang: str
     runnable: bool
     code: str
@@ -70,6 +104,18 @@ class ExampleOut(BaseModel):
     calls: list[AsgiRequest] = Field(default_factory=list)
     line_notes: list[LineNoteOut] = Field(default_factory=list)
     api_cards: list[ApiCardOut] = Field(default_factory=list)
+    concepts: list[ConceptOut] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def display_no(self) -> str:
+        m = re.match(r"ch(\d+)ex(\d+)", self.uid)
+        return f"{int(m.group(1))}-{int(m.group(2))}" if m else self.uid
+
+    @computed_field
+    @property
+    def display_name(self) -> str:
+        return self.title or self.caption or f"例子 {self.order}"
 
     @field_validator("calls", mode="before")
     @classmethod
@@ -95,6 +141,25 @@ class ChapterOut(BaseModel):
     title: str
     goal: str = ""
     examples: list[ExampleBrief] = Field(default_factory=list)
+    concepts: list[ConceptOut] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def display_title(self) -> str:
+        """统一编号口径。
+
+        教程的 data-title 是 "1 Python 补课"、"10 测试与部署"，但第 0 章是
+        "学习路线 · 环境"（不带数字）、附录是 "11 附录 · 速查"——直接拿来显示就会出现
+        侧栏没编号、正文有编号、第 0 章两边都不一样的情况。这里统一按 index 重新生成。
+        """
+        bare = re.sub(r"^\s*\d+\s*[.、·\-]?\s*", "", self.title).strip()
+        return f"第 {self.index} 章 · {bare or self.title}"
+
+    @computed_field
+    @property
+    def short_title(self) -> str:
+        """侧栏用的纯名字（去掉数字前缀）。"""
+        return re.sub(r"^\s*\d+\s*[.、·\-]?\s*", "", self.title).strip() or self.title
 
 
 Scalar = str | int | float | bool
@@ -151,6 +216,7 @@ class MetaOut(BaseModel):
     runnable: int
     line_notes: int
     api_cards: int
+    concepts: int = 0
     exec_timeout_ms: int
     max_mem_mb: int
     db_path: str = "app.db"

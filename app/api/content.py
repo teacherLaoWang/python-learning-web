@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.db import get_session
-from app.models import ApiCard, Chapter, Example, LineNote
+from app.models import ApiCard, Chapter, Concept, Example, LineNote
 from app.schemas import ChapterOut, ExampleOut, MetaOut
 
 router = APIRouter(prefix="/api", tags=["content"])
@@ -34,6 +34,7 @@ def read_meta(db: SessionDep, settings: SettingsDep) -> MetaOut:
         or 0,
         line_notes=db.scalar(select(func.count()).select_from(LineNote)) or 0,
         api_cards=db.scalar(select(func.count()).select_from(ApiCard)) or 0,
+        concepts=db.scalar(select(func.count()).select_from(Concept)) or 0,
         exec_timeout_ms=int(settings.exec_timeout * 1000),
         max_mem_mb=settings.max_mem_mb,
         db_path=str(settings.db_path.name),

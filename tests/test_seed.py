@@ -13,17 +13,26 @@ from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.db import SessionLocal, init_db
-from app.models import ApiCard, Chapter, Example, LineNote
+from app.models import ApiCard, Chapter, Concept, Example, LineNote
 from app.seed import load_notes, sync
 
 NOTES = {
     "ch02ex01": {
+        "title": "最小可跑服务",
+        "concepts": [
+            {"kind": "arch", "title": "这块代码在工程里的位置", "body": "入口文件"}
+        ],
         "line_notes": [
             {"line": 1, "text": "第一行"},
             {"line": 3, "to": 5, "kind": "warn", "text": "三到五行一个坑"},
         ],
-        "api_cards": [{"name": "FastAPI", "signature": "FastAPI()", "summary": "应用对象"}],
+        "api_cards": [
+            {"name": "FastAPI", "signature": "FastAPI()", "summary": "应用对象"}
+        ],
     }
+}
+CHAPTER_NOTES = {
+    "ch02": {"concepts": [{"kind": "base", "title": "ASGI 是什么", "body": "协议"}]}
 }
 
 
@@ -39,9 +48,11 @@ def _counts() -> tuple[int, int, int, int]:
 
 def test_notes_files_are_discoverable():
     """data/notes/*.json 应该被合并进 load_notes，文件名随意起。"""
-    merged = load_notes(get_settings().notes_dir)
-    assert "ch01ex01" in merged and "ch05ex02" in merged
-    assert merged["ch01ex01"]["line_notes"][0]["text"]
+    examples, chapters = load_notes(get_settings().notes_dir)
+    assert "ch01ex01" in examples and "ch05ex02" in examples
+    assert "ch01" in chapters, "_chapters 键下的章级内容要单独归一张表"
+    assert examples["ch01ex01"]["line_notes"][0]["text"]
+    assert chapters["ch01"]["concepts"], "第 1 章应该有基础概念"
 
 
 def test_seeding_twice_is_idempotent():
@@ -50,27 +61,53 @@ def test_seeding_twice_is_idempotent():
     settings = get_settings()
 
     with SessionLocal() as session:
-        sync(session, payload, NOTES, do_probe=False, only_chapter=None, settings=settings)
+        sync(
+            session,
+            payload,
+            NOTES,
+            do_probe=False,
+            only_chapter=None,
+            settings=settings,
+            chapter_notes=CHAPTER_NOTES,
+        )
         session.flush()
         first = (
             session.scalar(select(func.count()).select_from(Example)),
             session.scalar(select(func.count()).select_from(LineNote)),
             session.scalar(select(func.count()).select_from(ApiCard)),
+            session.scalar(select(func.count()).select_from(Concept)),
         )
         # 第二次灌：曾经在这里抛 IntegrityError
-        sync(session, payload, NOTES, do_probe=False, only_chapter=None, settings=settings)
+        sync(
+            session,
+            payload,
+            NOTES,
+            do_probe=False,
+            only_chapter=None,
+            settings=settings,
+            chapter_notes=CHAPTER_NOTES,
+        )
         session.flush()
         second = (
             session.scalar(select(func.count()).select_from(Example)),
             session.scalar(select(func.count()).select_from(LineNote)),
             session.scalar(select(func.count()).select_from(ApiCard)),
+            session.scalar(select(func.count()).select_from(Concept)),
         )
         example = session.scalar(select(Example).where(Example.uid == "ch02ex01"))
+        chapter = session.scalar(select(Chapter).where(Chapter.index == 2))
         assert [n.line_no for n in example.line_notes] == [1, 3]
         assert example.line_notes[1].to_line == 5
+        assert example.title == "最小可跑服务"
+        assert [c.title for c in example.concepts] == ["这块代码在工程里的位置"]
+        assert [c.title for c in chapter.concepts] == ["ASGI 是什么"], (
+            "章级概念挂在 chapter_id 上"
+        )
+        assert all(c.example_id is None for c in chapter.concepts)
         session.rollback()  # 不污染开发库
 
     assert first == second, "重复灌库不该改变行数"
+    assert first[3] >= 2, "例级 + 章级概念都要落库"
 
 
 def test_stale_examples_get_pruned():

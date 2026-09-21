@@ -1,5 +1,49 @@
 {
+  "_chapters": {
+    "ch02": {
+      "concepts": [
+        {
+          "kind": "base",
+          "title": "ASGI 是什么，为什么需要它",
+          "body": "WSGI（Flask、Django 老一派用的）规定「一个请求 = 一个函数调用，同步返回一个响应」。这个模型表达不了「服务端主动推」「一条连接上多个并发任务」「长连接里的等待」，因为它假定函数返回即结束。\n\nASGI 改成异步协议：应用收到 `scope`（这次连接/请求的上下文）+ `receive` / `send` 两个异步通道，自己决定什么时候收、什么时候发。FastAPI 的 app 对象其实就是一个 ASGI 应用：一个 `async def app(scope, receive, send)`。uvicorn 的职责只有两件：把 TCP/HTTP 拆成 scope 事件喂给你的 app，再把 app 发出的事件写回 socket。\n\n这解释了三件事：\n\n1. 为什么必须换 uvicorn 而不是用 gunicorn 的老 worker 跑 FastAPI（协议不同，gunicorn 要配 `-k uvicorn.workers.UvicornWorker`）；\n2. 为什么 `uvicorn main:app` 里那个 `app` 只是个变量名——它要的是「一个 ASGI callable」；\n3. 为什么本站的 asgi 模式可以不占端口就能调端点：直接 `ASGITransport(app=app)` 手工喂 scope，省掉真实 socket。"
+        },
+        {
+          "kind": "arch",
+          "title": "三层分工：代码 / 服务器 / 文档",
+          "body": "初学最容易混的是这三层各管什么：\n\n- 你的代码（app + 路由函数）：声明「什么路径、什么入参、返回什么」。\n- uvicorn：监听端口、解析 HTTP、把请求送进 app、把响应写回去，顺带 --reload / --workers。\n- /docs（Swagger UI）：读 `/openapi.json` 渲染出来。而那份 schema 是 FastAPI 从你的**类型注解和模型**里生成的。\n\n由此有个非常实用的判断：如果 /docs 里某个字段的类型或描述不对，问题一定在你的注解或模型上，不在前端也不在 uvicorn。反过来，写 FastAPI 的过程基本就是「把类型写清楚」的过程。"
+        },
+        {
+          "kind": "flow",
+          "title": "一个请求在 FastAPI 里的完整路径",
+          "body": "以第 2 章那个最小应用为例，请求进来后依次经过：\n\n1. uvicorn 收包 → 组装 ASGI scope（path、method、headers、query）。\n2. 中间件层（第 9 章）：从外到内一层层过，可读写请求/响应。\n3. 路由匹配：按注册顺序找第一个匹配的（这就是 `/tasks/export` 必须写在 `/tasks/{tid}` 前面的原因）。\n4. 依赖求解（第 5 章）：按拓扑顺序执行依赖，同一请求内相同依赖默认只算一次；失败就在进函数前抛出（401/422 常见来源）。\n5. 参数解析与校验：path / query / body / header / cookie 各按注解处理，不合规 → 422。\n6. 调用你的端点函数：async def 直接在事件循环里跑，普通 def 丢线程池。\n7. 出参处理：按 `response_model` 过滤 + 序列化，决定状态码，写响应头。\n8. 异常与响应中间件回程：全局异常处理器把异常统一成响应体。\n\n本站沙箱的 asgi 模式走的就是同一条路，只是第 1 步的 socket 换成了内存里的 transport。"
+        }
+      ]
+    },
+    "ch05": {
+      "concepts": [
+        {
+          "kind": "base",
+          "title": "依赖注入解决的不是「优雅」，是重复与顺序",
+          "body": "没有 Depends 的世界长什么样：每个端点开头三行都一样——解 token 查用户、开 session、算分页参数；结尾都要记得关 session；忘记一处就是一个连接泄漏。第 5 章第一个例子（without.py）演的就是这个。\n\n依赖注入把「怎么拿到这个值」从端点里搬出去，交给 FastAPI 在执行端点前完成。它同时给你三样东西：\n\n1. 复用：一份 `get_db`，全站端点共用，关闭时机由生成器的 `yield` 之后负责；\n2. 顺序与缓存：依赖可以依赖别的依赖（db → current_user 需要 db），FastAPI 按拓扑顺序执行，同一请求内相同依赖默认只跑一次；\n3. 可测试性：`app.dependency_overrides[get_db] = fake_db` 就能换掉实现，不用改一行业务代码——第 10 章的测试全靠它。\n\n判断你用对了没有，看端点函数体：如果里面还在手动解析 token、手动算 skip、手动 close session，那就是没抽干净。"
+        },
+        {
+          "kind": "compare",
+          "title": "Annotated 写法 vs 默认值写法",
+          "body": "两种都能跑：\n\n    def read(db=Depends(get_db))                      # 老写法\n    def read(db: Annotated[AsyncSession, Depends(get_db)])   # 推荐\n\n差别在「类型信息有没有留下来」。老写法里 `db` 这个参数的 Python 类型是未知的（那个默认值永远不会真的生效，它只是个信号），IDE 补全和 mypy 全都帮不上你；Annotated 把类型和注入声明放在一起，IDE 知道 db 是 AsyncSession，能补全 `.execute()`，mypy 也能查。\n\n教程第 5 章之后一律用 Annotated。看到旧代码用默认值写法不用惊奇，那是同一件事的历史版本。"
+        }
+      ]
+    }
+  },
+
   "ch02ex01": {
+    "title": "最小可跑服务：七行说明白 app / 路由 / 返回值",
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "这个文件在项目里的角色",
+        "body": "main.py 是入口。第 6 章会把它拆开：`app/main.py` 只做「装配」（创建 app、挂路由、加中间件），业务落到 `app/api/v1/endpoints/*.py`，公共件落到 `app/core/`。所以这里 `app = FastAPI()` 这一行，后面会长成一整套结构，但它的语义不变：这就是那个 ASGI 应用对象。"
+      }
+    ],
     "line_notes": [
       { "line": 1, "kind": "note", "text": "整个框架你真正要 import 的就是这一个类（外加后面的 Depends / HTTPException 等工具）。" },
       { "line": 3, "kind": "key", "text": "app 是一个 ASGI 应用对象，不是「服务器」。title 和 version 会原样出现在 /docs 页面和 /openapi.json 里，是免费的接口元信息。" },

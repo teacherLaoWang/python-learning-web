@@ -9,7 +9,7 @@ from __future__ import annotations
 from app.probe import _exc_name, _model_fields, detect_calls, summarize
 from app.sandbox import RunResult
 
-SNIPPET = '''
+SNIPPET = """
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
@@ -25,7 +25,7 @@ class TaskCreate(BaseModel):
 @router.post("/{tid}", status_code=201)          # 路径参数 + 行尾注释
 async def create(tid: int, payload: TaskCreate) -> dict:
     return {"tid": tid}
-'''
+"""
 
 
 def test_detect_calls_uses_router_prefix():
@@ -61,9 +61,18 @@ def test_exc_name_finds_exception_above_doc_link():
 
 def _result(**kw) -> RunResult:
     base = {
-        "ok": True, "mode": "plain", "exit_code": 0, "timed_out": False, "duration_ms": 10,
-        "stdout": "", "stderr": "", "truncated": False, "results": [], "workdir": "",
-        "peak_rss_mb": 1, "hint": "",
+        "ok": True,
+        "mode": "plain",
+        "exit_code": 0,
+        "timed_out": False,
+        "duration_ms": 10,
+        "stdout": "",
+        "stderr": "",
+        "truncated": False,
+        "results": [],
+        "workdir": "",
+        "peak_rss_mb": 1,
+        "hint": "",
     }
     base.update(kw)
     return RunResult(**base)
@@ -72,9 +81,14 @@ def _result(**kw) -> RunResult:
 def test_summarize_plain_states():
     assert summarize(_result(stdout="hi")) == ("ok", "hi")
     assert summarize(_result())[0] == "silent"
-    assert summarize(_result(mode="plain", exit_code=1, stderr="NameError: name 'app' is not defined"))[
-        0
-    ] == "error:NameError"
+    assert (
+        summarize(
+            _result(
+                mode="plain", exit_code=1, stderr="NameError: name 'app' is not defined"
+            )
+        )[0]
+        == "error:NameError"
+    )
 
 
 def test_summarize_asgi_ok_and_partial():
@@ -98,8 +112,12 @@ def test_summarize_asgi_ok_and_partial():
 def test_summarize_treats_no_http_response_as_error_not_partial():
     """跑都没跑起来（一个 status 都没有）不能标成「接口有 4xx」，那是误导。"""
     dead = _result(
-        mode="asgi", exit_code=1, stderr="SyntaxError: 'await' outside function",
-        results=[{"method": "-", "path": "-", "error": "snippet.py 执行失败，看上面的回溯"}],
+        mode="asgi",
+        exit_code=1,
+        stderr="SyntaxError: 'await' outside function",
+        results=[
+            {"method": "-", "path": "-", "error": "snippet.py 执行失败，看上面的回溯"}
+        ],
     )
     status, _ = summarize(dead)
     assert status == "error:no_http_result"

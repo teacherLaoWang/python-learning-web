@@ -1,10 +1,10 @@
 """从代码块里认出「这段代码定义了哪些接口」，并真跑一遍看能不能跑通。
 
-  detect_calls() —— 扫 `@app.get("/tasks/{tid}")` 这类装饰器，生成可以直接发给
-                    /api/run 的请求列表（含从 Pydantic 模型编出来的请求体样例）。
-                    前端用它预填「当服务调用」的请求编辑器。
-  probe()        —— 种数据时用：先用 plain 模式跑，片段型例子再用 asgi 模式试，
-                    结论写进 examples 表，页面上就有「✓ 实测可跑 / ⚠ 依赖上文」的标记。
+detect_calls() —— 扫 `@app.get("/tasks/{tid}")` 这类装饰器，生成可以直接发给
+                  /api/run 的请求列表（含从 Pydantic 模型编出来的请求体样例）。
+                  前端用它预填「当服务调用」的请求编辑器。
+probe()        —— 种数据时用：先用 plain 模式跑，片段型例子再用 asgi 模式试，
+                  结论写进 examples 表，页面上就有「✓ 实测可跑 / ⚠ 依赖上文」的标记。
 """
 
 from __future__ import annotations
@@ -144,7 +144,9 @@ def _sample_value(name: str, default: str | None) -> Any:
     return SAMPLE_BY_NAME.get(name, "demo")
 
 
-def _body_for(code: str, deco_end: int, models: dict[str, dict[str, Any]]) -> dict | None:
+def _body_for(
+    code: str, deco_end: int, models: dict[str, dict[str, Any]]
+) -> dict | None:
     """装饰器下面那个函数里，第一个「类型是本块代码定义的模型」的参数就是请求体。"""
     inner = _params_source(code, deco_end)
     if inner is None:
@@ -171,7 +173,7 @@ def _params_source(code: str, start: int) -> str | None:
         return None
     depth = 1
     collected: list[str] = []
-    for char in code[m.end():]:
+    for char in code[m.end() :]:
         if char in "([{":
             depth += 1
         elif char in ")]}":
@@ -213,25 +215,42 @@ def summarize(result: RunResult) -> tuple[str, str]:
         if not result.results:
             return "error:no_result", "\n".join(head[-3:])[:300]
         codes = " ".join(
-            str(r.get("status") if r.get("status") is not None else f"err:{str(r.get('error'))[:28]}")
+            str(
+                r.get("status")
+                if r.get("status") is not None
+                else f"err:{str(r.get('error'))[:28]}"
+            )
             for r in result.results[:6]
         )
         got_response = any(r.get("status") is not None for r in result.results)
         if not got_response:  # 一个响应都没拿到，说明根本没跑起来，不算「有 4xx」
             return "error:no_http_result", codes
-        bad = any((r.get("status") or 0) >= 400 or r.get("error") for r in result.results)
-        sample = next((r.get("body") for r in result.results if r.get("status") == 200), None)
-        detail = json.dumps(sample, ensure_ascii=False)[:260] if sample is not None else ""
-        return ("asgi_partial" if bad else "asgi_ok"), f"{codes}{(' | ' + detail) if detail else ''}"
+        bad = any(
+            (r.get("status") or 0) >= 400 or r.get("error") for r in result.results
+        )
+        sample = next(
+            (r.get("body") for r in result.results if r.get("status") == 200), None
+        )
+        detail = (
+            json.dumps(sample, ensure_ascii=False)[:260] if sample is not None else ""
+        )
+        return (
+            "asgi_partial" if bad else "asgi_ok"
+        ), f"{codes}{(' | ' + detail) if detail else ''}"
 
     if result.exit_code != 0:
         return f"error:{_exc_name(result.stderr)}", "\n".join(head[-3:])[:300]
     if not result.stdout.strip():
-        return "silent", "跑通了但没有输出：这类例子改用「当服务调用」，或自己加两行 print"
+        return (
+            "silent",
+            "跑通了但没有输出：这类例子改用「当服务调用」，或自己加两行 print",
+        )
     return "ok", "\n".join(head[:6])[:400]
 
 
-EXC_RE = re.compile(r"\b([A-Za-z_][\w.]*(?:Error|Exception|Warning|KeyboardInterrupt|SystemExit))\b")
+EXC_RE = re.compile(
+    r"\b([A-Za-z_][\w.]*(?:Error|Exception|Warning|KeyboardInterrupt|SystemExit))\b"
+)
 
 
 def _exc_name(stderr: str) -> str:
@@ -240,7 +259,9 @@ def _exc_name(stderr: str) -> str:
     从最后一行往前找而不是只看最后一行：pydantic 的报错末尾是一串文档链接，
     真正的 `ValidationError: ...` 在上面几行。
     """
-    for line in reversed([ln for ln in (stderr or "").strip().splitlines() if ln.strip()]):
+    for line in reversed(
+        [ln for ln in (stderr or "").strip().splitlines() if ln.strip()]
+    ):
         m = EXC_RE.search(line)
         if m:
             return m.group(1).rsplit(".", 1)[-1]

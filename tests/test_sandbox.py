@@ -87,7 +87,7 @@ def test_flooded_output_is_truncated(fast_settings):
 
 
 # ---------- ASGI 模式 ---------------------------------------------------
-FASTAPI_SNIPPET = '''
+FASTAPI_SNIPPET = """
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -107,7 +107,7 @@ def health() -> dict:
 @app.post("/tasks")
 def create(task: Task) -> dict:
     return {"echo": task.model_dump(), "id": 1}
-'''
+"""
 
 
 def test_asgi_calls_endpoints_without_opening_a_port(fast_settings):
@@ -185,7 +185,11 @@ def test_same_example_uid_reuses_workdir(fast_settings):
 
 
 def test_path_traversal_uid_is_rejected(fast_settings):
-    _run("import os; open('pwn', 'w').write(os.getcwd())", fast_settings, example_uid="../../escape")
+    _run(
+        "import os; open('pwn', 'w').write(os.getcwd())",
+        fast_settings,
+        example_uid="../../escape",
+    )
     assert not (fast_settings.data_dir.parent / "escape").exists()
     runs = sorted(p.name for p in (fast_settings.data_dir / "runs").iterdir())
     assert runs and all(not name.startswith("escape") for name in runs)

@@ -26,55 +26,74 @@ uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8100
 
 ## 怎么用
 
+内容的分工是：**逐行的解释内联在代码里（像注释），右栏只放系统性东西**（模块功能、API 卡片、实测记录），章头再放一节「本章要先搞懂的概念」。
+
 | 动作 | 说明 |
 | --- | --- |
-| 点代码任意一行 | 右侧显示这一行的解释；没写解释的行会告诉你去哪个文件补 |
+| 看代码 | 带彩点的行有解释，解释就印在该行下方；`≡ 行内解释` 可整体开关 |
+| 点代码任意一行 | 高亮该行并把它的注释闪一下（注释较长时方便定位） |
 | `▶ 运行` | plain 模式：把代码当脚本跑，回收 stdout / stderr / 回溯 / 耗时 / 峰值内存 |
 | `⇄ 当服务调用` | asgi 模式：不占端口，用 `httpx.ASGITransport` 在子进程里直接调 app 的端点；请求清单可改 |
 | `✎ 改代码` | 改成你自己的版本，跑的是改后的内容；`还原` 回到原文 |
+| 拖中缝 / 拖代码底部横条 | 调两栏宽度、调代码区高度（上下方向也能调），尺寸记在 localStorage；顶栏「重排面板」回默认 |
 | `标记已学` | 只写 localStorage，不发后端 |
-| 顶栏搜索 | 全 12 章搜代码、标题、解释文字、API 卡片名 |
+| 顶栏搜索 | 全 12 章搜代码、中文标题、文件名、解释文字、概念正文、API 卡片名 |
 | 键盘 | `1`–`0` 跳章，`[` `]` 上/下一章 |
 
-例子标题旁的标记来自 `--probe` 的实测结论，不是猜的：`实测跑通` / `跑通但无输出` /
-`接口有 4xx` / `实测跑不通` / `非 Python`。片段型例子（依赖上文定义的 `router`、`Page`）
-本来就跑不通，标出来是为了让你知道**该连着看而不是单看这一块**。
+标题旁的徽章来自 `--probe` 的实测结论，不是猜的：`实测跑通` / `跑通·无输出` / `接口有 4xx` /
+`片段：依赖上文` / `节选：非完整文件` / `跑超时被拦` / `非 Python`。教程是循序渐进搭一个项目的，
+60 个块里只有少数能独立运行，标出来是为了告诉你**该连着看，而不是这块写错了**。
 
 ## 目录
 
 ```
 app/
-├── main.py          装配：lifespan 建库/自动播种、中间件、统一异常、静态挂载
+├── main.py          装配：lifespan 建库/自动播种、中间件、统一异常、首页注入资源版本号
 ├── config.py        Settings（env 前缀 PLW_，或根目录 .env）
 ├── db.py            engine / SessionLocal / get_session 依赖
-├── models.py        Chapter ─< Example ─< LineNote / ApiCard
-├── schemas.py       出入参契约（Pydantic v2）
+├── models.py        Chapter ─< Example ─< LineNote / ApiCard / Concept，Chapter ─< Concept
+├── schemas.py       出参契约（含 display_title / display_no / display_name 计算字段）
 ├── sandbox.py       受限子进程执行器（三道闸 + 输出截断）
 ├── probe.py         识别代码里的接口 + 实测例子可运行性
 ├── seed.py          seed.json + notes/*.json → SQLite（幂等 upsert）
-├── api/content.py   GET /api/meta /chapters /examples /examples/{uid}
+├── api/content.py   GET /api/meta /chapters /chapters/{i} /examples /examples/{uid}
 ├── api/run.py       POST /api/run /api/calls
-└── static/          index.html · style.css · app.js
+└── static/          index.html · style.css · app.js（无构建、无 CDN、无框架）
 tools/extract_tutorial.py   教程 HTML → data/seed.json（只用标准库）
 data/
 ├── seed.json        抽取产物（提交进仓库，别人 clone 即用）
-├── notes/*.json     人工逐行解释 + API 卡片 —— 内容真相源
+├── notes/*.json     中文标题 + 逐行解释 + 概念 + API 卡片 —— 内容真相源
 ├── app.db           SQLite（不提交）
 └── runs/<uid>/      例子的工作目录（不提交；同一例子的工作目录会复用）
-tests/               test_sandbox.py（14）· test_probe.py（9）· test_seed.py（3）· test_api.py（15）
+tests/               test_sandbox.py（15）· test_probe.py（9）· test_seed.py（3）· test_api.py（19）
 ```
 
 ## 补内容（这是这个站最有价值的部分）
 
-解释和 API 卡片写成 JSON 放在 `data/notes/`，一个文件可以管几个例子，按章命名即可：
+内容全在 `data/notes/*.json`，一个文件可以跨章。四样东西：**中文标题 `title`**（列表和卡片上显示它，
+`caption` 里的文件名退成副标题）、**逐行解释 `line_notes`**（内联进代码）、**概念 `concepts`**
+（右栏/章头的系统性讲解）、**API 卡片 `api_cards`**。
 
 ```jsonc
 // data/notes/ch07.json
 {
+  "_chapters": {                       // 章级内容按 slug 挂，一个文件跨章时靠这个区分
+    "ch07": {
+      "concepts": [
+        { "kind": "base", "title": "ORM 到底替你做了什么", "body": "分段写，空行分段；\n    四个空格开头的行会渲染成代码块；`反引号` 变行内代码。" },
+        { "kind": "flow", "title": "一次请求怎么走到数据库", "body": "……" }
+      ]
+    }
+  },
+
   "ch07ex02": {
+    "title": "仓储层：只处理数据，不懂 HTTP",
+    "concepts": [
+      { "kind": "arch", "title": "这个文件在工程里的位置", "body": "repositories/ 只依赖 models，不 import fastapi……" }
+    ],
     "line_notes": [
       { "line": 6, "kind": "key",  "text": "为什么用 select() 而不是 ORM 快捷方式……" },
-      { "line": "8", "to": 11, "kind": "warn", "text": "这段整体讲一个坑……" }
+      { "line": 8, "to": 11, "kind": "warn", "text": "这四行整体是一个坑……" }
     ],
     "api_cards": [
       {
@@ -91,9 +110,11 @@ tests/               test_sandbox.py（14）· test_probe.py（9）· test_seed.
 }
 ```
 
-- `kind`：`note`（普通解释）/ `key`（关键行，绿点）/ `warn`（易错点，黄点）
-- `to`：把 `line` 到 `to` 当成一段来讲（讲多行结构时很有用）
-- 改完跑 `uv run python -m app.seed`，刷新页面即生效。重跑不会丢探测结果，也不会产生重复行
+- `kind`（line_notes）：`note` 普通 / `key` 关键行（绿点绿底）/ `warn` 易错点（黄点黄底）
+- `kind`（concepts）：`base` 基础概念 / `arch` 模块与结构 / `flow` 执行流程 / `compare` 对比，四种颜色左边框不同
+- `to`：一条注释讲 `line` 到 `to` 这一整段，注释挂在这段的最后一行下方
+- 改完 `uv run python -m app.seed` 即可（`--probe` 才会重跑可运行性探测）。重跑不产生重复行，也不丢已有探测结果
+- 概念正文支持「空行分段 / 四空格缩进当代码块 / 反引号行内代码」，不引 markdown 库
 
 想批量看某个例子的原文和 uid：`uv run python -m app.seed --probe --chapter 7` 的结果表，
 或者直接 `curl 127.0.0.1:8100/api/examples/ch07ex02 | uv run python -m json.tool`。
@@ -110,7 +131,7 @@ tests/               test_sandbox.py（14）· test_probe.py（9）· test_seed.
   这条限制由 `tests/test_sandbox.py::test_memory_hog_hit_by_watchdog` 兜着
 - 限额可调：`PLW_EXEC_TIMEOUT=15 PLW_MAX_MEM_MB=2048 uv run uvicorn ...`
 
-## 工程实录（我自己踩过的三个坑）
+## 工程实录（我自己踩过的坑）
 
 1. **`preexec_fn` 在线程池宿主里不安全**。FastAPI 的同步依赖跑在线程池，`preexec_fn` 会在 fork 后、
    exec 前动父进程状态。改成「子进程自己读 argv 里的限额，先 `setrlimit` 再 `runpy.run_path`」，
@@ -118,16 +139,25 @@ tests/               test_sandbox.py（14）· test_probe.py（9）· test_seed.
 2. **`-I`（isolated）不是「啥包都看不到」**。它忽略 `PYTHONPATH` 和用户级 site-packages，
    venv 自己的 site-packages 仍在——所以子进程能 `import fastapi`，但学习者 `pip install --user`
    装的东西进不去，环境更可预测。
-3. **`dict` 里存 JSON 字符串**（`ApiCard.params`）是为了先跑通再迁移；真要查参数就走 `--probe`
-   那套「重新灌库」的路子。教程第 7 章讲的两类错误（字符串当协议 / 提前建一堆表）这里都避开了：
-   `params` 只在出参时被 Pydantic 校验器还原成列表。
+3. **关系集合整体赋值会「先 INSERT 后 DELETE」**。`example.line_notes = 新列表` 第二次灌库时撞
+   `(example_id, line_no)` 唯一约束直接崩。`_replace_*` 里先赋空、`flush()`、再赋新值。
+4. **SQLite WAL 也有配套的删除**。`--clean` 只删 `app.db` 留下 `-wal`/`-shm`，下一个进程开库就
+   「no such table」；服务还开着时删文件则直接 `disk I/O error`。现在 `_wipe()` 连旁文件一起删、
+   先 `engine.dispose()`，并在提示里写清「先停服务再 clean」。
+5. **静态资源必须有版本号**。改了 `style.css` 加新规则，页面里的开关死活不生效：`fetch(..., no-store)`
+   拿到新内容，`<link>` 用的却是内存里的旧副本，`Cache-Control: no-cache` 也没救回来。现在 `/` 由路由
+   渲染，把 `style.css?v=<mtime+size 哈希>` 注进 HTML——文件一变 URL 就变，物理上用不到旧副本。
+6. **`dict` 里存 JSON 字符串**（`ApiCard.params`）是为了先跑通再迁移；教程第 7 章讲的两类错误
+   （字符串当协议 / 提前建一堆表）这里都避开了：`params` 只在出参时被 Pydantic 校验器还原成列表。
 
 ## 测试
 
 ```bash
-uv run pytest              # 41 条：沙箱 14 · 识别与判定 9 · 灌库 3 · 接口 15
+uv run pytest              # 47 条：沙箱 15 · 识别与判定 9 · 灌库 3 · 接口 20
 uv run ruff check app tools tests
+uv run ruff format app tools tests
 ```
 
-沙箱那 14 条是这个项目的验收标准：正常代码能跑、回溯能定位到行号、
-死循环 / 卡住 / 吃内存 / 刷屏四种情况都被拦住、asgi 模式真能调到端点、非法 uid 不能穿越目录。
+沙箱那 15 条是执行器的验收标准：正常代码能跑、回溯定位到行号且不掺引导脚本自己的帧、
+死循环 / 卡住 / 吃内存 / 刷屏四种情况都被拦住、asgi 模式真能调到端点并跑 lifespan、
+非法 uid 不能穿越目录。灌库那 3 条专门钉住上面第 3、4 个坑。

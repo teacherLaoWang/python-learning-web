@@ -30,21 +30,39 @@ HEADING_TAGS = ("h2", "h3", "h4", "h5")
 
 # 先看块的第一行形状，再看全块关键词。教程里的 <pre> 不带 class，只能猜。
 FIRST_LINE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("bash", re.compile(r"^\s*(\$ |#{1,2}\s?(uv|pip|docker|alembic|git) )|^(uv|pip|docker|alembic|git|cd|mkdir|curl|ls|export|python3?)\s+\S")),# yapf: skip
+    (
+        "bash",
+        re.compile(
+            r"^\s*(\$ |#{1,2}\s?(uv|pip|docker|alembic|git) )|^(uv|pip|docker|alembic|git|cd|mkdir|curl|ls|export|python3?)\s+\S"
+        ),
+    ),  # yapf: skip
     ("dockerfile", re.compile(r"^\s*FROM\s+\w")),
     ("http", re.compile(r"^\s*(GET|POST|PUT|PATCH|DELETE)\s+/")),
-    ("sql", re.compile(r"^\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|PRAGMA)\b", re.IGNORECASE)),
+    (
+        "sql",
+        re.compile(
+            r"^\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|PRAGMA)\b", re.IGNORECASE
+        ),
+    ),
     ("toml", re.compile(r"^\s*\[[\w.]+\]\s*$")),
     ("json", re.compile(r"^\s*[{[]")),
-    ("python", re.compile(r'^\s*(from |import |def |async def |class |@|if __name__|with |for |while |try:|match |return |[A-Za-z_][\w.]*\s*(:?=|->))')),
+    (
+        "python",
+        re.compile(
+            r"^\s*(from |import |def |async def |class |@|if __name__|with |for |while |try:|match |return |[A-Za-z_][\w.]*\s*(:?=|->))"
+        ),
+    ),
 )
 
 # 目录树 / 终端粘贴 / 表格那类块：没有可执行语义
 TREE_LINE = re.compile(r"^\s*(├|└|│|·|-{2,}|\s{2,}\w.*/\s*$|\S+\.\w+\s*($|#))")
 
-# 教程里代码块的小标题长这样："main.py python"、"core/config.py — 只读一次 python"，
-# 末尾的语言标签是装饰用的，抽出来当 caption 时去掉。
-LANG_TAIL = re.compile(r"\s+(python|py|bash|sh|shell|json|sql|toml|ya?ml|dockerfile|http)\s*$", re.IGNORECASE)
+# 教程里代码块的小标题长这样："main.py python"、"项目结构 text"，末尾的语言标签是
+# 装饰用的，抽出来当 caption 时去掉（text/txt/md/log 也算语言标签，别留在名字里）。
+LANG_TAIL = re.compile(
+    r"\s+(python|py|bash|sh|shell|json|sql|toml|ya?ml|dockerfile|http|text|txt|md|log)\s*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -212,7 +230,9 @@ def _looks_like_tree(code: str) -> bool:
     lines = [ln for ln in code.splitlines() if ln.strip()]
     if len(lines) < 2:
         return False
-    if re.search(r"^\s*(from|import|def|class|async def|@)\b", "\n".join(lines[:3]), re.MULTILINE):
+    if re.search(
+        r"^\s*(from|import|def|class|async def|@)\b", "\n".join(lines[:3]), re.MULTILINE
+    ):
         return False
     hits = sum(1 for ln in lines if TREE_LINE.search(ln) or ln.rstrip().endswith("/"))
     return hits / len(lines) >= 0.6
@@ -293,14 +313,18 @@ def main(argv: list[str] | None = None) -> int:
 
     payload = build_payload(args.src)
     src = payload["source"]
-    print(f"章节 {src['chapter_count']} · 代码块 {src['example_count']} · sha {src['sha256']}")
+    print(
+        f"章节 {src['chapter_count']} · 代码块 {src['example_count']} · sha {src['sha256']}"
+    )
     for ch in payload["chapters"]:  # type: ignore[index]
         langs: dict[str, int] = {}
         for ex in ch["examples"]:
             langs[ex["lang"]] = langs.get(ex["lang"], 0) + 1
         runnable = sum(1 for ex in ch["examples"] if ex["runnable"])
         lang_txt = " ".join(f"{k}:{v}" for k, v in sorted(langs.items()))
-        print(f"  ch{ch['index']:02d} {ch['title']:<16} {len(ch['examples']):>2} 块  可跑 {runnable:>2}  {lang_txt}")
+        print(
+            f"  ch{ch['index']:02d} {ch['title']:<16} {len(ch['examples']):>2} 块  可跑 {runnable:>2}  {lang_txt}"
+        )
 
     if args.check:
         return 0

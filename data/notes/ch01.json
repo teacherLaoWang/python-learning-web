@@ -1,5 +1,33 @@
 {
+  "_chapters": {
+    "ch01": {
+      "concepts": [
+        {
+          "kind": "base",
+          "title": "类型注解在 Python 里到底起什么作用",
+          "body": "先把一件事分清楚：解释器不看注解，工具看。\n\nPython 的类型注解（`a: int`、`-> int`）在运行时只是挂在函数 `__annotations__` 上的元数据，CPython 拿它不做任何检查——`add(\"x\",\"y\")` 照样返回 `\"xy\"`。它的价值分两条路兑现：\n\n1. 静态工具（mypy / pyright）在你不运行代码的前提下检查注解是否自洽，把「传错类型」从线上事故提前到编辑器里；\n2. 运行时框架（FastAPI / Pydantic）把注解当输入契约读出来，真的去做校验和转换。\n\n所以同一行 `count: int = Field(gt=0)`，在纯 Python 里只是提示，进了 FastAPI 就变成会返回 422 的规则。后面所有「为什么它自动帮我校验了」的疑问，都是第 2 条在起作用。"
+        },
+        {
+          "kind": "compare",
+          "title": "dataclass 与 Pydantic BaseModel：不是二选一，是分工",
+          "body": "两个长得很像，做的事差一层：\n\n- `@dataclass`（标准库）：把带注解的字段变成 `__init__` / `__repr__` / `__eq__`，省样板。不校验、不转换，`PointDC(x=\"3\")` 里的 x 就是字符串。\n- `BaseModel`（Pydantic）：除了上面的，还做转换（`\"3\"` → 3）、校验（`\"abc\"` → ValidationError）、序列化（`model_dump()`）。\n\n工程里的分工通常是：跨网络边界的数据用 BaseModel（请求体、响应体、配置解析），纯内部值对象用 dataclass（快、零依赖）。FastAPI 看着省事，是因为它把 BaseModel 塞进了「进」和「出」两个口：进来的 JSON 校验完变成对象，出去的对象按 `response_model` 过滤成 JSON。"
+        },
+        {
+          "kind": "base",
+          "title": "装饰器：只是「函数进、函数出」的语法糖",
+          "body": "`@deco` 贴在 `def f` 上面，完全等价于 `f = deco(f)`。没有魔法：Python 定义完 f 之后调用 deco，把返回值重新绑回 f 这个名字。\n\n由此推出三件实用的事：\n\n1. `@app.get(\"/\")` 是「带参数的装饰器」——`app.get(\"/\")` 先返回一个装饰器，装饰器再把你的函数登记进路由表。看三层结构（参数层 / 装饰层 / wrapper 层）时别被绕住。\n2. 被装饰的函数名字最终指向 wrapper。不加 `@wraps(fn)`，`__name__` 会变成 `wrapper`，FastAPI 的路由名、日志、`url_path_for` 全糊掉。\n3. 计时/日志类装饰器对 `async def` 要另写一套：同步 wrapper 拿到的是协程对象，测出来的耗时恒为 0。"
+        },
+        {
+          "kind": "base",
+          "title": "协程与事件循环：async 到底换来了什么",
+          "body": "`async def f()` 叫协程函数，调用它不执行函数体，而是返回一个 coroutine 对象——一个「还没兑现的承诺」。必须 `await` 才真正驱动它，忘了就得到 `coroutine was never awaited`（而且函数体一行都没跑）。\n\n为什么值得这么麻烦：一个进程里只有一个事件循环（单线程）。某个请求在等数据库返回 200ms，如果写 `time.sleep(0.2)` 或 `requests.get(...)`，这段时间整个进程什么都干不了，所有请求排队；写成 `await asyncio.sleep(0.2)` / `await httpx.get(...)`，控制权交还事件循环，它就去处理别的请求。等待被重叠掉，吞吐上去，线程数不用上去。\n\n三条推论能避开大部分异步事故：\n\n1. `async def` 里不能出现阻塞调用（同步 requests、重 CPU、`time.sleep`）——一个慢请求拖慢所有人。\n2. 做不到就别硬 async：写普通 `def` 端点，FastAPI 会把它丢进线程池，反而正确。\n3. 并发不是自动的。连着 `await a(); await b()` 仍是串行，要并发得 `asyncio.gather(a(), b())`。"
+        }
+      ]
+    }
+  },
+
   "ch01ex01": {
+    "title": "类型注解：写了不等于生效",
     "line_notes": [
       { "line": 1, "kind": "key", "text": "类型注解写在参数名后面、返回值写在 -> 后面。它们在运行时只是元数据（存在 add.__annotations__ 里），CPython 不会拿它们做任何检查。" },
       { "line": 2, "kind": "note", "text": "函数体和注解无关，正常执行。" },
@@ -29,12 +57,20 @@
   },
 
   "ch01ex02": {
+    "title": "同一份字段定义，dataclass 与 Pydantic 的差别",
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "这块代码在工程里的位置",
+        "body": "model_compare.py 是选型对照例，不属于任何一层。目的是让你在写响应模型（第 4 章）、读配置（第 6 章）时知道自己选的是什么：内部值对象用 dataclass 就够；凡是数据来自外部（JSON、表单、环境变量）的地方用 BaseModel，因为你要的是那句「转换 + 校验 + 导出」。"
+      }
+    ],
     "line_notes": [
       { "line": 1, "kind": "note", "text": "标准库的 dataclasses：帮你自动生成 __init__ / __repr__ / __eq__，本质是「少写样板的结构体」。" },
       { "line": 2, "kind": "note", "text": "pydantic 的 BaseModel 和 Field：除了结构体，还多做两件事——校验输入、按需转换类型，并且能导出 JSON。" },
       { "line": 4, "to": 7, "kind": "note", "text": "@dataclass 只是装饰类，把带注解的字段变成 __init__ 参数。注意这里还是「注解」，不是「约束」。" },
       { "line": 9, "kind": "warn", "text": "dataclass 接受 x='3' 并且字段真的就是字符串 '3'。它不校验、不转换。想要「传进来的字符串自动变成 int」，就得换 BaseModel。" },
-      { "line": "11", "to": 13, "kind": "key", "text": "BaseModel 的三件套：转换（coercion）、校验（validation）、序列化（model_dump / model_dump_json）。FastAPI 的请求体和响应体走的都是它。" },
+      { "line": 11, "to": 13, "kind": "key", "text": "BaseModel 的三件套：转换（coercion）、校验（validation）、序列化（model_dump / model_dump_json）。FastAPI 的请求体和响应体走的都是它。" },
       { "line": 14, "kind": "note", "text": "Field() 用来给字段加元数据：默认值 + 约束。max_length=10 只作用在字符串上，超了就是校验错误。" },
       { "line": 16, "kind": "key", "text": "Point(x='3', y=4.0) 通过：'3' → 3（int），4.0 → 4（int）。Pydantic v2 的宽松模式允许「无损失」的转换——浮点只有在小数部分为 0 时才允许转 int，4.5 会报错。" },
       { "line": 17, "kind": "warn", "text": "x='abc' 转不成整数，抛 ValidationError。在 FastAPI 里这个异常会被自动翻译成 422 响应 + 详细的错误定位；自己手动构造模型时，记得 try/except pydantic.ValidationError。" }
@@ -65,7 +101,7 @@
         "summary": "给字段挂默认值和约束；description 会直接出现在 /docs 的 schema 里。",
         "params": [{ "name": "default", "type": "Any", "note": "不写就是必填字段" }, { "name": "max_length / gt / ge", "type": "number", "note": "对 str 用长度，对数字用大小" }],
         "returns": "FieldInfo 对象（不是值本身）",
-        "gotcha": "可变默认值不要写成 Field 之外的 list/dict，Pydantic 会帮你深拷贝，但 dataclass 那边要 default_factory。"
+        "gotcha": "可变默认值不要写在 Field 之外，Pydantic 会帮你深拷贝，但 dataclass 那边要 default_factory。"
       },
       {
         "name": "model_dump / model_dump_json",
@@ -80,20 +116,28 @@
   },
 
   "ch01ex03": {
+    "title": "手写一个装饰器：@wraps 与计时",
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "为什么这是 FastAPI 的前置知识",
+        "body": "FastAPI 的整个 API 表面都是装饰器：@app.get、@router.post、@app.middleware(\"http\")、@field_validator。看懂「timed = 函数进函数出」，再看 app.get(\"/\") 返回装饰器、装饰器把函数登记进路由表后原样返回函数，就没有任何神秘感了。第 5 章的依赖、第 9 章的中间件都建立在同一个语法点上。"
+      }
+    ],
     "line_notes": [
-      { "line": "1", "to": 2, "kind": "note", "text": "wraps 来自 functools，是写装饰器的必备件。" },
+      { "line": 1, "to": 2, "kind": "note", "text": "wraps 来自 functools，是写装饰器的必备件。" },
       { "line": 4, "kind": "key", "text": "timed 接收一个函数、返回一个函数——这就是装饰器的全部形状。@timed 不过是 timed(slow_query) 的语法糖。" },
       { "line": 5, "kind": "warn", "text": "不加 @wraps(fn) 的话，被装饰函数的 __name__ 会变成 'wrapper'、docstring 丢失。FastAPI 里更实际的影响：路由的 name / operation id / 日志全变成 wrapper，调试时认不出来。" },
-      { "line": "6", "to": 10, "kind": "note", "text": "wrapper 用 *args/**kwargs 原样转发参数：计时 → 调原函数 → 打印耗时 → 把结果返回。" },
-      { "line": "13", "to": 15, "kind": "note", "text": "@timed 贴在 def slow_query 上面，于是 slow_query 这个名字最终指向 wrapper。" },
-      { "line": 11, "kind": "key", "text": "运行这段会打印 slow_query took 0.20Xs。想复用：把这个文件存成 timed.py，然后 from timed import timed。" }
+      { "line": 6, "to": 10, "kind": "note", "text": "wrapper 用 *args/**kwargs 原样转发参数：计时 → 调原函数 → 打印耗时 → 把结果返回。" },
+      { "line": 11, "kind": "key", "text": "运行这段会打印 slow_query took 0.20Xs。想复用：存成 timed.py，然后 from timed import timed。" },
+      { "line": 13, "to": 15, "kind": "note", "text": "@timed 贴在 def slow_query 上面，于是 slow_query 这个名字最终指向 wrapper。" }
     ],
     "api_cards": [
       {
         "name": "装饰器（decorator）",
         "signature": "@deco\ndef f(): ...   # 等价于 f = deco(f)",
         "kind": "concept",
-        "summary": "一个「函数进、函数出」的高阶函数，用来在不调用点改动的情况下包住行为。FastAPI 的 @app.get(...) 就是带参数的装饰器：先 app.get('/') 返回一个装饰器，再拿它装饰你的函数。",
+        "summary": "一个「函数进、函数出」的高阶函数，用来在不调用点改动的情况下包住行为。FastAPI 的 @app.get(...) 是带参数的装饰器：先 app.get('/') 返回装饰器，再拿它装饰你的函数。",
         "params": [],
         "returns": "通常是替换后的新函数",
         "gotcha": "带参数的装饰器要套三层（参数层 / 装饰层 / wrapper 层），写漏一层就会得到「TypeError: 期望 2 个参数」这类怪错。"
@@ -105,7 +149,7 @@
         "summary": "把原函数的 __name__、__doc__、__module__、__qualname__ 复制到 wrapper 上。",
         "params": [],
         "returns": "装饰器本身",
-        "gotcha": "它只复制元信息，不改变签名：inspect.signature(wrapper) 默认能透过 __wrapped__ 看到原签名，但 type hints 仍需自己维护。"
+        "gotcha": "它只复制元信息，不改变签名：inspect.signature(wrapper) 能透过 __wrapped__ 看到原签名，但 type hints 仍需自己维护。"
       },
       {
         "name": "time.perf_counter()",
@@ -120,11 +164,19 @@
   },
 
   "ch01ex05": {
+    "title": "协程陷阱：调用 ≠ 执行",
+    "concepts": [
+      {
+        "kind": "flow",
+        "title": "一次 await 的生命周期",
+        "body": "调用 `fetch()` → 得到一个 coroutine 对象（函数体一行没跑）→ 交给 `await`（或 asyncio.run / create_task）→ 事件循环驱动它执行 → 途中遇到 await 就挂起自己、把控制权交回循环 → 完成后把结果给你。\n\n所以这段要跑起来得包一层：\n\n    import asyncio\n    async def main():\n        return await fetch()\n    print(asyncio.run(main()))   # 42\n\n顶层直接 `await x` 是 SyntaxError——await 只能出现在 async def 里面（或交互式解释器）。"
+      }
+    ],
     "line_notes": [
       { "line": 1, "kind": "key", "text": "带 async def 的函数叫协程函数：调用它不执行函数体，而是返回一个 coroutine 对象。" },
       { "line": 3, "kind": "warn", "text": "x 拿到的不是 42，是 <coroutine object fetch at 0x...>。这就是新手最常见的坑：调了却忘了 await，函数体一行都没跑。" },
       { "line": 4, "kind": "key", "text": "await 才真正驱动协程运行并取回结果。await 只能出现在 async def 里面。" },
-      { "line": 5, "kind": "warn", "text": " coroutine 创建后没被 await，GC 回收时会报 RuntimeWarning: coroutine 'fetch' was never awaited。另外这段代码直接整块运行会 SyntaxError（顶层 await 非法），改法是包一个 main 再 asyncio.run(main())。" }
+      { "line": 5, "kind": "warn", "text": "coroutine 创建后没被 await，被 GC 回收时会报 RuntimeWarning: coroutine 'fetch' was never awaited。另外这块代码整块直接跑会 SyntaxError（顶层 await 非法），改法见右侧「一次 await 的生命周期」。" }
     ],
     "api_cards": [
       {
@@ -134,7 +186,7 @@
         "summary": "从同步世界进入异步世界的门：新建事件循环、跑完协程、收尾关闭。",
         "params": [],
         "returns": "最外层协程的返回结果",
-        "gotcha": "不能在已经跑着事件循环的地方调用（比如 Jupyter 顶层、或 FastAPI 的 async 端点里），会得到「asyncio.run() cannot be called from a running event loop」。"
+        "gotcha": "不能在已经跑着事件循环的地方调用（Jupyter 顶层、FastAPI 的 async 端点里），会得到「asyncio.run() cannot be called from a running event loop」。"
       },
       {
         "name": "await",
