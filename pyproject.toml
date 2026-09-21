@@ -1,0 +1,32 @@
+[project]
+name = "python-learning-web"
+version = "0.1.0"
+description = "Python / FastAPI 逐行解释学习站：静态前端展示 + 后端受限子进程真跑 Python"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "asgi-lifespan>=2.1.0",
+    "fastapi>=0.141.1",
+    "psutil>=7.2.2",
+    "pydantic-settings>=2.15.0",
+    "python-multipart>=0.0.32",
+    "sqlalchemy>=2.0.54",
+    "uvicorn[standard]>=0.53.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+]
+
+# pythonpath 是为了 `uv run pytest` 能 import 到项目根的 app 包
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true

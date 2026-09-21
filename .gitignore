@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 工具缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 本地状态：数据库和执行痕迹不提交（seed.json 是内容快照，提交）
+data/app.db
+data/app.db-wal
+data/app.db-shm
+data/runs/
+*.db
+*.sqlite3
+
+# 私密配置
+.env
+.env.local
+
+# macOS
+.DS_Store

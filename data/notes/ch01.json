@@ -1,0 +1,150 @@
+{
+  "ch01ex01": {
+    "line_notes": [
+      { "line": 1, "kind": "key", "text": "类型注解写在参数名后面、返回值写在 -> 后面。它们在运行时只是元数据（存在 add.__annotations__ 里），CPython 不会拿它们做任何检查。" },
+      { "line": 2, "kind": "note", "text": "函数体和注解无关，正常执行。" },
+      { "line": 4, "kind": "warn", "text": "传两个字符串不报错：str + str 本来就是合法运算，结果是 'xy'。也就是说「传错类型」这件事，Python 只在真正执行到不支持的操作时才炸，注解拦不住。" },
+      { "line": 5, "kind": "warn", "text": "1 + 2.5 = 3.5，和 -> int 明显不符，但依然不报错。要严格就得靠静态检查工具：mypy / pyright 做类型检查，ruff 做 lint（它默认不看类型一致性）。FastAPI 的价值就在这里——它把注解拿去真的做校验和转换了。" }
+    ],
+    "api_cards": [
+      {
+        "name": "__annotations__",
+        "signature": "func.__annotations__ -> {'a': int, 'b': int, 'return': int}",
+        "kind": "concept",
+        "summary": "注解的存放处。FastAPI / Pydantic 就是用 inspect 读它，才知道该校验什么、该注入什么。",
+        "params": [],
+        "returns": "一个 dict，键是参数名（含 'return'），值是被注解的对象本身",
+        "gotcha": "Python 3.10+ 里写 str | None 这种新式语法，取出来可能是字符串而不是类型对象（受 PEP 563 影响），所以 FastAPI 用 typing.get_type_hints() 而不是直接读属性。"
+      },
+      {
+        "name": "mypy / pyright（静态类型检查）",
+        "signature": "uvx mypy main.py",
+        "kind": "concept",
+        "summary": "不运行代码，只看注解是否自洽，把「传错类型」从运行时提前到写代码时。",
+        "params": [{ "name": "--strict", "type": "flag", "note": "打开所有严格规则，老项目一次开全会爆出一堆错" }],
+        "returns": "终端里的诊断列表；有错时退出码非 0",
+        "gotcha": "只对「写了注解」的部分生效；没注解的函数它基本放行。"
+      }
+    ]
+  },
+
+  "ch01ex02": {
+    "line_notes": [
+      { "line": 1, "kind": "note", "text": "标准库的 dataclasses：帮你自动生成 __init__ / __repr__ / __eq__，本质是「少写样板的结构体」。" },
+      { "line": 2, "kind": "note", "text": "pydantic 的 BaseModel 和 Field：除了结构体，还多做两件事——校验输入、按需转换类型，并且能导出 JSON。" },
+      { "line": 4, "to": 7, "kind": "note", "text": "@dataclass 只是装饰类，把带注解的字段变成 __init__ 参数。注意这里还是「注解」，不是「约束」。" },
+      { "line": 9, "kind": "warn", "text": "dataclass 接受 x='3' 并且字段真的就是字符串 '3'。它不校验、不转换。想要「传进来的字符串自动变成 int」，就得换 BaseModel。" },
+      { "line": "11", "to": 13, "kind": "key", "text": "BaseModel 的三件套：转换（coercion）、校验（validation）、序列化（model_dump / model_dump_json）。FastAPI 的请求体和响应体走的都是它。" },
+      { "line": 14, "kind": "note", "text": "Field() 用来给字段加元数据：默认值 + 约束。max_length=10 只作用在字符串上，超了就是校验错误。" },
+      { "line": 16, "kind": "key", "text": "Point(x='3', y=4.0) 通过：'3' → 3（int），4.0 → 4（int）。Pydantic v2 的宽松模式允许「无损失」的转换——浮点只有在小数部分为 0 时才允许转 int，4.5 会报错。" },
+      { "line": 17, "kind": "warn", "text": "x='abc' 转不成整数，抛 ValidationError。在 FastAPI 里这个异常会被自动翻译成 422 响应 + 详细的错误定位；自己手动构造模型时，记得 try/except pydantic.ValidationError。" }
+    ],
+    "api_cards": [
+      {
+        "name": "dataclass",
+        "signature": "@dataclass class Foo: a: int; b: str = ''",
+        "kind": "api",
+        "summary": "生成 __init__/__repr__/__eq__ 等样板代码，字段类型注解只是记录，不做任何校验。",
+        "params": [{ "name": "frozen", "type": "bool", "note": "True 时实例不可改，可哈希" }, { "name": "slots", "type": "bool", "note": "3.10+，省内存、防拼错属性名" }],
+        "returns": "装饰后的同一个类",
+        "gotcha": "它连「类型不对」都不管，所以千万别拿它当输入校验用。"
+      },
+      {
+        "name": "pydantic.BaseModel",
+        "signature": "class Point(BaseModel): x: int; y: int",
+        "kind": "api",
+        "summary": "带校验和转换的模型基类；实例化即校验，字段可加 Field 约束。",
+        "params": [],
+        "returns": "校验通过的实例，属性类型和注解一致（转换过了）",
+        "gotcha": "默认是宽松转换：'3' 会变 3。要「严格类型」用 ConfigDict(strict=True) 或字段级 Field(strict=True)。"
+      },
+      {
+        "name": "Field",
+        "signature": "Field(default='', max_length=10, gt=0, description='...')",
+        "kind": "api",
+        "summary": "给字段挂默认值和约束；description 会直接出现在 /docs 的 schema 里。",
+        "params": [{ "name": "default", "type": "Any", "note": "不写就是必填字段" }, { "name": "max_length / gt / ge", "type": "number", "note": "对 str 用长度，对数字用大小" }],
+        "returns": "FieldInfo 对象（不是值本身）",
+        "gotcha": "可变默认值不要写成 Field 之外的 list/dict，Pydantic 会帮你深拷贝，但 dataclass 那边要 default_factory。"
+      },
+      {
+        "name": "model_dump / model_dump_json",
+        "signature": "p.model_dump() -> dict；p.model_dump_json() -> str",
+        "kind": "api",
+        "summary": "v2 的导出方法（v1 叫 .dict() / .json()）。可配合 response_model 做字段裁剪。",
+        "params": [{ "name": "exclude={'password'}", "type": "set", "note": "少往外吐字段，防泄漏" }],
+        "returns": "dict 或 JSON 字符串",
+        "gotcha": "教程里很多老代码写 .dict()，v2 虽然还留着但已废弃，别照抄。"
+      }
+    ]
+  },
+
+  "ch01ex03": {
+    "line_notes": [
+      { "line": "1", "to": 2, "kind": "note", "text": "wraps 来自 functools，是写装饰器的必备件。" },
+      { "line": 4, "kind": "key", "text": "timed 接收一个函数、返回一个函数——这就是装饰器的全部形状。@timed 不过是 timed(slow_query) 的语法糖。" },
+      { "line": 5, "kind": "warn", "text": "不加 @wraps(fn) 的话，被装饰函数的 __name__ 会变成 'wrapper'、docstring 丢失。FastAPI 里更实际的影响：路由的 name / operation id / 日志全变成 wrapper，调试时认不出来。" },
+      { "line": "6", "to": 10, "kind": "note", "text": "wrapper 用 *args/**kwargs 原样转发参数：计时 → 调原函数 → 打印耗时 → 把结果返回。" },
+      { "line": "13", "to": 15, "kind": "note", "text": "@timed 贴在 def slow_query 上面，于是 slow_query 这个名字最终指向 wrapper。" },
+      { "line": 11, "kind": "key", "text": "运行这段会打印 slow_query took 0.20Xs。想复用：把这个文件存成 timed.py，然后 from timed import timed。" }
+    ],
+    "api_cards": [
+      {
+        "name": "装饰器（decorator）",
+        "signature": "@deco\ndef f(): ...   # 等价于 f = deco(f)",
+        "kind": "concept",
+        "summary": "一个「函数进、函数出」的高阶函数，用来在不调用点改动的情况下包住行为。FastAPI 的 @app.get(...) 就是带参数的装饰器：先 app.get('/') 返回一个装饰器，再拿它装饰你的函数。",
+        "params": [],
+        "returns": "通常是替换后的新函数",
+        "gotcha": "带参数的装饰器要套三层（参数层 / 装饰层 / wrapper 层），写漏一层就会得到「TypeError: 期望 2 个参数」这类怪错。"
+      },
+      {
+        "name": "functools.wraps",
+        "signature": "@wraps(original)",
+        "kind": "api",
+        "summary": "把原函数的 __name__、__doc__、__module__、__qualname__ 复制到 wrapper 上。",
+        "params": [],
+        "returns": "装饰器本身",
+        "gotcha": "它只复制元信息，不改变签名：inspect.signature(wrapper) 默认能透过 __wrapped__ 看到原签名，但 type hints 仍需自己维护。"
+      },
+      {
+        "name": "time.perf_counter()",
+        "signature": "time.perf_counter() -> float（秒）",
+        "kind": "api",
+        "summary": "高精度计时器，专门用来测耗时，不受系统时钟回拨影响。",
+        "params": [],
+        "returns": "一个没有绝对意义的时间点，只能相减",
+        "gotcha": "别用 time.time() 测耗时（会被 NTP 校时影响），也别拿 perf_counter 的原始值当时间戳。"
+      }
+    ]
+  },
+
+  "ch01ex05": {
+    "line_notes": [
+      { "line": 1, "kind": "key", "text": "带 async def 的函数叫协程函数：调用它不执行函数体，而是返回一个 coroutine 对象。" },
+      { "line": 3, "kind": "warn", "text": "x 拿到的不是 42，是 <coroutine object fetch at 0x...>。这就是新手最常见的坑：调了却忘了 await，函数体一行都没跑。" },
+      { "line": 4, "kind": "key", "text": "await 才真正驱动协程运行并取回结果。await 只能出现在 async def 里面。" },
+      { "line": 5, "kind": "warn", "text": " coroutine 创建后没被 await，GC 回收时会报 RuntimeWarning: coroutine 'fetch' was never awaited。另外这段代码直接整块运行会 SyntaxError（顶层 await 非法），改法是包一个 main 再 asyncio.run(main())。" }
+    ],
+    "api_cards": [
+      {
+        "name": "asyncio.run",
+        "signature": "asyncio.run(coro) -> 协程的返回值",
+        "kind": "api",
+        "summary": "从同步世界进入异步世界的门：新建事件循环、跑完协程、收尾关闭。",
+        "params": [],
+        "returns": "最外层协程的返回结果",
+        "gotcha": "不能在已经跑着事件循环的地方调用（比如 Jupyter 顶层、或 FastAPI 的 async 端点里），会得到「asyncio.run() cannot be called from a running event loop」。"
+      },
+      {
+        "name": "await",
+        "signature": "value = await coro()",
+        "kind": "concept",
+        "summary": "在这里让出控制权，等协程完成，把结果取回来。",
+        "params": [],
+        "returns": "被等待协程/Task 的结果",
+        "gotcha": "await 不等于「并发」。想并发要 asyncio.gather(a, b)；串行 await 三次就是老老实实等三遍。"
+      }
+    ]
+  }
+}

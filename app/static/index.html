@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Python 逐行解释学习站 · FastAPI 教程实操</title>
+    <link rel="stylesheet" href="style.css" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🐍</text></svg>" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <b>Python 逐行解释</b>
+        <span>FastAPI 教程 12 章 · 代码可直接改直接跑</span>
+      </div>
+      <div class="meta" id="meta">加载中…</div>
+      <div class="actions">
+        <a href="/docs" target="_blank" rel="noreferrer">后端 API 文档</a>
+        <button type="button" id="btnClearProgress" title="清掉localStorage里的已学标记">清空进度</button>
+      </div>
+    </header>
+
+    <main>
+      <aside class="side">
+        <div class="side-head">
+          <input type="search" id="search" placeholder="搜例子：Depends / lifespan / JWT…" />
+          <label class="toggle"><input type="checkbox" id="onlyRunnable" /> 只看能跑的</label>
+        </div>
+        <nav class="chapters" id="chapters"></nav>
+        <div class="legend">
+          <div><i class="dot key"></i>关键行</div>
+          <div><i class="dot warn"></i>易错点</div>
+          <div><i class="dot note"></i>普通解释</div>
+        </div>
+      </aside>
+
+      <section class="content" id="content">
+        <div class="loading" id="loading">正在读取章节…（首次启动会自动建库灌数据）</div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

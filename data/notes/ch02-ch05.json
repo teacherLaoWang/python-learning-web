@@ -1,0 +1,95 @@
+{
+  "ch02ex01": {
+    "line_notes": [
+      { "line": 1, "kind": "note", "text": "整个框架你真正要 import 的就是这一个类（外加后面的 Depends / HTTPException 等工具）。" },
+      { "line": 3, "kind": "key", "text": "app 是一个 ASGI 应用对象，不是「服务器」。title 和 version 会原样出现在 /docs 页面和 /openapi.json 里，是免费的接口元信息。" },
+      { "line": 5, "kind": "key", "text": "@app.get(\"/\") 把下面的函数登记成「GET / 由它处理」。它等价于 app.add_api_route('/', root, methods=['GET'])，只是装饰器写法更省事。" },
+      { "line": 6, "kind": "note", "text": "async def 和 def 都能被注册成路由。区别在于：async def 直接在事件循环里跑（里面必须用 await）；写成普通 def 时 FastAPI 会把它扔到线程池，避免阻塞事件循环。含耗时同步 I/O（读文件、调旧 SDK）的端点反而应该写 def。" },
+      { "line": 7, "kind": "note", "text": "直接 return dict。FastAPI 会 jsonable_encoder 一下再包成 JSONResponse，状态码默认 200。这就是它比 Flask 多做的事：返回值不是 Response，而是「你要的数据」。" }
+    ],
+    "api_cards": [
+      {
+        "name": "FastAPI()",
+        "signature": "FastAPI(*, title, version, debug=False, lifespan=None, docs_url='/docs')",
+        "kind": "api",
+        "summary": "应用对象本身，同时是所有路由的注册中心。一个进程里通常只有一个。",
+        "params": [
+          { "name": "title / version", "type": "str", "note": "文档页标题，别省略" },
+          { "name": "lifespan", "type": "异步上下文管理器", "note": "启动/关闭时建连接池、建表、清理资源（取代已废弃的 on_event）" },
+          { "name": "docs_url", "type": "str | None", "note": "改成 None 可以关掉在线文档，生产环境常关" }
+        ],
+        "returns": "ASGI 应用实例，交给 uvicorn 跑",
+        "gotcha": "它不监听端口。端口是 uvicorn 的事；新手常把「代码跑起来没反应」误认为 FastAPI 坏了。"
+      },
+      {
+        "name": "@app.get / post / put / patch / delete",
+        "signature": "@app.get(path, *, status_code=None, response_model=None, tags=None, summary=None)",
+        "kind": "api",
+        "summary": "登记路由。同一个函数可以贴多个装饰器挂多个路径。",
+        "params": [
+          { "name": "path", "type": "str", "note": "支持 {name} 路径参数" },
+          { "name": "status_code", "type": "int", "note": "创建类接口常显式写 201" },
+          { "name": "response_model", "type": "模型", "note": "出参契约 + 裁剪字段" }
+        ],
+        "returns": "装饰器（把你原样的函数登记后原样返回）",
+        "gotcha": "路由按注册顺序匹配。把 /tasks/export 写在 /tasks/{tid} 后面，就会被 {tid} 先吃掉（tid='export'）。"
+      },
+      {
+        "name": "uvicorn（命令行）",
+        "signature": "uvicorn 模块路径:变量名 --reload",
+        "kind": "api",
+        "summary": "ASGI 服务器。冒号左边是「可从当前目录 import 到的模块」，右边是模块里的 app 变量。",
+        "params": [
+          { "name": "app.main:app", "type": "str", "note": "app/main.py 里的 app；直接跑 main.py 就写 main:app" },
+          { "name": "--reload", "type": "flag", "note": "改代码自动重启，只用于开发" },
+          { "name": "--host 0.0.0.0", "type": "str", "note": "容器/对外时必填；本机用默认 127.0.0.1 更安全" }
+        ],
+        "returns": "一个持续运行的服务进程",
+        "gotcha": "--reload 需要 watchfiles 依赖；生产环境用 --workers N，而不是 --reload。"
+      }
+    ]
+  },
+
+  "ch05ex02": {
+    "line_notes": [
+      { "line": 4, "kind": "warn", "text": "这一行依赖前文定义的 router、Page、OrderOut，单独跑必然 NameError。整块代码要连着看，这也是为什么它顶上的标记是「接口有 4xx」而不是「实测跑通」。" },
+      { "line": "5", "to": 9, "kind": "note", "text": "参数从「一长串」变成「一行一个」，这是 Depends 多了之后的必然排版，Black/ruff format 也会保持这种写法。" },
+      { "line": 6, "kind": "key", "text": "Annotated[AsyncSession, Depends(get_db)]：方括号里前者是「类型」（给校验和文档用），后者是「怎么拿到这个值」（给注入用）。数据库连接由 get_db 负责开，函数结束时由它负责关。" },
+      { "line": 7, "kind": "key", "text": "Depends(current_user) 把「鉴权」变成一个依赖：它内部读 Authorization 头、验 JWT、失败就抛 401。端点里一行代码都不用写，拿到的一定是已登录的 User。" },
+      { "line": 8, "kind": "note", "text": "page_params 是个「从 query string 造对象」的依赖：进去是 ?page=2&size=20，出来是 PageQuery 实例。多个端点共用一份解析逻辑。" },
+      { "line": 10, "kind": "key", "text": "函数体只剩一句业务调用。判断 Depends 用得对不对的标准就是这句：如果端点里还在手动解析 token、手动算 skip、手动 close session，那就是还没把重复抽出去。" }
+    ],
+    "api_cards": [
+      {
+        "name": "Depends",
+        "signature": "Depends(dependency=None, *, use_cache=True)",
+        "kind": "api",
+        "summary": "声明「这个参数由这个可调用对象提供」。依赖本身可以是普通函数或 async 函数，也能再依赖别的东西（形成树）。",
+        "params": [
+          { "name": "dependency", "type": "callable", "note": "不传就退化成 Depends()，用于类式依赖" },
+          { "name": "use_cache", "type": "bool", "note": "同一请求内同一依赖只执行一次；关掉它才能拿到「每次都不一样」的值" }
+        ],
+        "returns": "一个 Depends 对象（放在 Annotated 的第二项，或直接当参数默认值）",
+        "gotcha": "「同一请求内只算一次」是按依赖函数 + 其参数判定的。写 use_cache=False 才能看到 expensive 被调用两次，本站第 5 章的例子可以直接改这个参数对照。"
+      },
+      {
+        "name": "Annotated",
+        "signature": "Annotated[类型, 元数据1, 元数据2]",
+        "kind": "api",
+        "summary": "给类型挂额外信息。FastAPI 推荐写法：类型和注入/校验规则放在一起，参数默认值留给 Python 自己用。",
+        "params": [{ "name": "第一项", "type": "type", "note": "真正的类型" }],
+        "returns": "带元数据的类型别名",
+        "gotcha": "旧写法 def f(db=Depends(get_db)) 仍然能用，但会丢掉 IDE 的类型提示，且默认值语义混乱（那个默认值永远不会生效）。"
+      },
+      {
+        "name": "response_model",
+        "signature": "@router.get('/orders', response_model=Page[OrderOut])",
+        "kind": "api",
+        "summary": "出参契约：按 OrderOut 的字段过滤返回值、做类型转换，并写进 OpenAPI 文档。",
+        "params": [{ "name": "Page[OrderOut]", "type": "泛型模型", "note": "自定义 list[T] 式容器，让分页结构也能生成 schema" }],
+        "returns": "序列化后的响应体（比你 return 的对象更瘦）",
+        "gotcha": "它只裁剪输出，不防止你多查数据；也别指望它做输入校验。字段没在模型里声明就悄悄消失，排查时很容易懵。"
+      }
+    ]
+  }
+}

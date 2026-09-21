@@ -1,0 +1,766 @@
+{
+  "source": {
+    "file": "/Users/xing/Desktop/qoder/日常学习-明兴/FastAPI-learn/fastapi-入门教程.html",
+    "sha256": "56e7841678a2f1c7",
+    "chapter_count": 12,
+    "example_count": 60
+  },
+  "chapters": [
+    {
+      "index": 0,
+      "slug": "ch00",
+      "title": "学习路线 · 环境",
+      "goal": "装好环境，跑通第一个服务",
+      "examples": [
+        {
+          "uid": "ch00ex01",
+          "order": 1,
+          "heading": "0. 先看清地图，再上路",
+          "context": "main.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from fastapi import FastAPI, HTTPException\nfrom pydantic import BaseModel, Field\n\napp = FastAPI()\n\nclass RegisterIn(BaseModel):                    # <- 定义一次，校验 + 文档全有了\n    email: str\n    password: str = Field(min_length=8)\n    age: int | None = None\n\n@app.post(\"/api/v1/users\")\nasync def register(payload: RegisterIn):        # <- 类型注解就是\"接口契约\"\n    user = await create_user(payload)           #   进来时已经是校验过的干净数据\n    if user is None:\n        raise HTTPException(status_code=409, detail=\"email already exists\")\n    return {\"id\": user.id, \"email\": user.email} # <- 返回 dict/对象，自动变 JSON",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch00ex02",
+          "order": 2,
+          "heading": "0. 先看清地图，再上路",
+          "context": "terminal",
+          "lang": "bash",
+          "runnable": false,
+          "code": "$ python3 --version            # 需要 3.10 以上，推荐 3.12\n$ mkdir fastapi-handbook && cd fastapi-handbook\n$ python3 -m venv .venv                    # 每个项目一个独立环境，别装到全局\n$ source .venv/bin/activate                # Windows: .venv\\Scripts\\activate\n$ pip install -U pip\n$ pip install \"fastapi[standard]\"          # 自带 uvicorn / pydantic / 热重载 CLI\n$ pip install \"sqlalchemy>=2.0\" httpx pytest pytest-asyncio",
+          "line_notes": [],
+          "api_cards": []
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "slug": "ch01",
+      "title": "1 Python 补课",
+      "goal": "看懂 FastAPI 代码里的所有 Python 语法",
+      "examples": [
+        {
+          "uid": "ch01ex01",
+          "order": 1,
+          "heading": "1. 只补 FastAPI 用得上的那部分 Python",
+          "context": "typing_demo.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "def add(a: int, b: int) -> int:     # a、b 是 int，返回值是 int\n    return a + b\n\nadd(\"x\", \"y\")                        # Python 不拦你，返回 \"xy\"（注解不是约束）\nadd(1, 2.5)                          # 也不报错 —— 严格检查要靠 mypy / ruff 这类工具",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch01ex02",
+          "order": 2,
+          "heading": "1. 只补 FastAPI 用得上的那部分 Python",
+          "context": "model_compare.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from dataclasses import dataclass\nfrom pydantic import BaseModel, Field\n\n@dataclass                                  # 只是\"少写样板的结构体\"\nclass PointDC:\n    x: int\n    y: int\n\nPointDC(x=\"3\", y=\"4\")                       # 照样接受，里面是字符串 —— 它不校验\n\nclass Point(BaseModel):                     # Pydantic：会转换 + 会校验 + 能导出 JSON\n    x: int\n    y: int\n    label: str = Field(default=\"\", max_length=10)\n\nPoint(x=\"3\", y=4.0)                         # 自动转换 -> x=3 (int), y=4 (int)\nPoint(x=\"abc\")                              # ValidationError: Input should be a valid integer",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch01ex03",
+          "order": 3,
+          "heading": "1. 只补 FastAPI 用得上的那部分 Python",
+          "context": "decorator.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "import time\nfrom functools import wraps\n\ndef timed(fn):\n    @wraps(fn)                              # 保留原函数的 __name__ 等信息\n    def wrapper(*args, **kwargs):\n        start = time.perf_counter()\n        result = fn(*args, **kwargs)\n        print(f\"{fn.__name__} took {time.perf_counter()-start:.3f}s\")\n        return result\n    return wrapper\n\n@timed\ndef slow_query():\n    time.sleep(0.2)\n\n# 等价于： slow_query = timed(slow_query)",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch01ex04",
+          "order": 4,
+          "heading": "1. 只补 FastAPI 用得上的那部分 Python",
+          "context": "async_rules.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "import asyncio, time\nfrom fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get(\"/bad\")\nasync def bad():                      # 事件循环被 sleep 卡住，期间所有请求排队\n    time.sleep(3)\n    return {\"ok\": True}\n\n@app.get(\"/good\")\nasync def good():                     # 挂起自己，把控制权交还事件循环\n    await asyncio.sleep(3)\n    return {\"ok\": True}\n\n@app.get(\"/also-good\")\ndef also_good():                      # 同步阻塞就用普通 def，FastAPI 交给线程池\n    time.sleep(3)\n    return {\"ok\": True}\n\n@app.get(\"/mixed-bug\")\nasync def mixed_bug():                # 经典事故：async 里用同步 requests\n    import requests\n    return requests.get(\"https://api.github.com\").json()",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch01ex05",
+          "order": 5,
+          "heading": "1. 只补 FastAPI 用得上的那部分 Python",
+          "context": "coroutine_trap.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "async def fetch(): return 42\n\nx = fetch()               # 这不是结果！这是一个 coroutine 对象，是\"待执行的承诺\"\nresult = await x          # 真正拿到 42\n                          # 忘了 await 是新手报错 \"coroutine was never awaited\" 的根源",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch01ex06",
+          "order": 6,
+          "heading": "1. 只补 FastAPI 用得上的那部分 Python",
+          "context": "结构 text",
+          "lang": "text",
+          "runnable": false,
+          "code": "fastapi-handbook/\n|-- .venv/\n|-- app/\n|   |-- __init__.py          <-- 空文件也要有，它让 app 成为\"包\"\n|   |-- main.py\n|   '-- core/config.py\n'-- tests/",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch01ex07",
+          "order": 7,
+          "heading": "1. 只补 FastAPI 用得上的那部分 Python",
+          "context": "terminal",
+          "lang": "bash",
+          "runnable": false,
+          "code": "$ uvicorn app.main:app --reload     # 冒号左边是\"模块路径\"，右边是变量名\n$ fastapi dev app/main.py           # 这种写法更直观，开发期推荐",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch01ex08",
+          "order": 8,
+          "heading": "1. 只补 FastAPI 用得上的那部分 Python",
+          "context": "before.py — 现实里常看到的写法",
+          "lang": "python",
+          "runnable": true,
+          "code": "@app.route(\"/order\", methods=[\"POST\"])\ndef create_order():\n    data = request.get_json()\n    if not data.get(\"sku\"): return jsonify({\"error\": \"no sku\"}), 400\n    if int(data.get(\"count\", 0)) <= 0: return jsonify({\"error\": \"bad count\"}), 400\n    if data.get(\"coupon\") and len(data[\"coupon\"]) > 16: ...\n    # 校验写了 20 行，真正的业务还没开始",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch01ex09",
+          "order": 9,
+          "heading": "1. 只补 FastAPI 用得上的那部分 Python",
+          "context": "after.py — 类型即校验",
+          "lang": "python",
+          "runnable": true,
+          "code": "from decimal import Decimal\nfrom fastapi import FastAPI\nfrom pydantic import BaseModel, Field, field_validator\n\napp = FastAPI()\n\nclass OrderItem(BaseModel):\n    sku: str = Field(min_length=1, max_length=32)\n    count: int = Field(gt=0, le=999)\n    price: Decimal\n\nclass OrderCreate(BaseModel):\n    user_id: int\n    items: list[OrderItem] = Field(min_length=1)\n    coupon: str | None = Field(default=None, max_length=16)\n\n    @field_validator(\"items\")\n    @classmethod\n    def total_limit(cls, v: list[OrderItem]) -> list[OrderItem]:\n        if sum(i.count * i.price for i in v) > Decimal(\"50000\"):\n            raise ValueError(\"order amount exceeds limit\")\n        return v\n\n@app.post(\"/orders\", status_code=201)\nasync def create_order(payload: OrderCreate) -> dict[str, object]:\n    order = await order_service.create(payload)   # 到这里 payload 一定是干净的\n    return {\"order_no\": order.order_no}",
+          "line_notes": [],
+          "api_cards": []
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "slug": "ch02",
+      "title": "2 第一个接口",
+      "goal": "跑起来 + 看懂自动文档",
+      "examples": [
+        {
+          "uid": "ch02ex01",
+          "order": 1,
+          "heading": "2. 第一个能跑的服务",
+          "context": "main.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from fastapi import FastAPI\n\napp = FastAPI(title=\"Demo\", version=\"0.1.0\")   # app 是所有路由的注册中心\n\n@app.get(\"/\")\nasync def root():\n    return {\"message\": \"hello fastapi\"}",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch02ex02",
+          "order": 2,
+          "heading": "2. 第一个能跑的服务",
+          "context": "terminal",
+          "lang": "bash",
+          "runnable": false,
+          "code": "$ fastapi dev main.py                          # 开发：热重载\n$ uvicorn main:app --reload --port 8000      # 等价的底层命令，值得认识\n$ curl -s localhost:8000/ | python3 -m json.tool",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch02ex03",
+          "order": 3,
+          "heading": "2. 第一个能跑的服务",
+          "context": "app/main.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "import os, time\nfrom fastapi import FastAPI, Response\nfrom pydantic import BaseModel\n\nSTART = time.time()\napp = FastAPI(\n    title=\"Order Service\",\n    version=os.getenv(\"GIT_SHA\", \"dev\"),\n    docs_url=\"/docs\" if os.getenv(\"ENV\") != \"prod\" else None,   # 生产按需关文档\n    redoc_url=None,\n)\n\nclass Health(BaseModel):\n    status: str\n    uptime_seconds: int\n    version: str\n\n@app.get(\"/healthz\", response_model=Health, tags=[\"ops\"])\nasync def health() -> Health:\n    \"\"\"存活探针：只要进程能响应就返回 200。别在这里查数据库。\"\"\"\n    return Health(status=\"ok\", uptime_seconds=int(time.time() - START), version=app.version)\n\n@app.get(\"/readyz\", tags=[\"ops\"])\nasync def readiness(res: Response):\n    \"\"\"就绪探针：这里才检查依赖（DB / Redis / 下游）。失败返回 503 让流量摘掉。\"\"\"\n    if not await db_reachable():\n        res.status_code = 503\n        return {\"status\": \"degraded\"}\n    return {\"status\": \"ready\"}\n\nasync def db_reachable() -> bool:\n    return True   # 占位；第 7 章换成真实的 SELECT 1",
+          "line_notes": [],
+          "api_cards": []
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "slug": "ch03",
+      "title": "3 参数三件套",
+      "goal": "path/query/body/表单/文件 全部拿下",
+      "examples": [
+        {
+          "uid": "ch03ex01",
+          "order": 1,
+          "heading": "3. 参数：路径、查询、请求体",
+          "context": "params.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from typing import Annotated, Literal\nfrom fastapi import APIRouter, Path, Query\n\nrouter = APIRouter(prefix=\"/tasks\", tags=[\"tasks\"])\n\n@router.get(\"/{task_id}\")\nasync def get_task(\n    task_id: Annotated[int, Path(ge=1, description=\"任务主键\")],\n    with_detail: Annotated[bool, Query()] = False,      # ?with_detail=true\n): ...\n\n@router.get(\"\")\nasync def list_tasks(\n    status: Annotated[Literal[\"open\", \"doing\", \"done\"], Query()] = \"open\",\n    page: Annotated[int, Query(ge=1)] = 1,\n    size: Annotated[int, Query(ge=1, le=100)] = 20,      # 上限必须有！见下方工程实录\n    q: Annotated[str | None, Query(min_length=2)] = None,\n): ...",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch03ex02",
+          "order": 2,
+          "heading": "3. 参数：路径、查询、请求体",
+          "context": "body.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from typing import Annotated, Literal\nfrom fastapi import Body, FastAPI\nfrom pydantic import BaseModel, Field, field_validator\n\napp = FastAPI()\n\nclass Feedback(BaseModel):\n    title: str = Field(min_length=2, max_length=120)\n    email: str                                  # 想严格校验邮箱：EmailStr + email-validator\n    severity: Literal[\"low\", \"high\"] = \"low\"\n    tags: list[str] = Field(default_factory=list)\n\n    @field_validator(\"tags\")\n    @classmethod\n    def dedupe(cls, v: list[str]) -> list[str]:\n        return sorted({t.strip().lower() for t in v if t.strip()})\n\n@app.post(\"/feedback\", status_code=201)\nasync def create_feedback(fb: Feedback, notify: Annotated[bool, Body()] = False):\n    return {\"received\": fb.title, \"notify\": notify}",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch03ex03",
+          "order": 3,
+          "heading": "3. 参数：路径、查询、请求体",
+          "context": "query_model.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "class Pagination(BaseModel):\n    page: int = Field(1, ge=1)\n    size: int = Field(20, ge=1, le=100)\n\n@router.get(\"/tasks\")\nasync def list_bad(p: Pagination):                       # 变成要传 JSON body 了\n    ...\n\n@router.get(\"/tasks\")\nasync def list_ok(p: Annotated[Pagination, Query()]):     # 现在读 ?page=2&size=50\n    ...",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch03ex04",
+          "order": 4,
+          "heading": "3. 参数：路径、查询、请求体",
+          "context": "upload.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from typing import Annotated\nfrom fastapi import FastAPI, File, Form, HTTPException, UploadFile\n\napp = FastAPI()\nALLOWED = {\"image/png\", \"image/jpeg\", \"image/webp\"}\nMAX_BYTES = 5 * 1024 * 1024\n\n@app.post(\"/avatars\")\nasync def upload_avatar(\n    user_id: Annotated[int, Form()],\n    file: Annotated[UploadFile, File()],\n):\n    if file.content_type not in ALLOWED:\n        raise HTTPException(415, f\"unsupported type: {file.content_type}\")\n    buf = bytearray()\n    while chunk := await file.read(1024 * 1024):         # 分块读，边读边判大小\n        buf.extend(chunk)\n        if len(buf) > MAX_BYTES:\n            raise HTTPException(413, \"file too large\")\n    # 生产环境：内容嗅探（magic bytes）二次确认 + 重新命名 + 落对象存储\n    # 绝不能相信客户端给的 content_type 和 filename\n    return {\"filename\": file.filename, \"size\": len(buf)}",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch03ex05",
+          "order": 5,
+          "heading": "3. 参数：路径、查询、请求体",
+          "context": "routers/tasks.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from typing import Annotated, Literal\nfrom fastapi import APIRouter, Query\nfrom pydantic import BaseModel, Field\nfrom sqlalchemy import select\n\nclass PageQuery(BaseModel):\n    page: Annotated[int, Field(ge=1)] = 1\n    size: Annotated[int, Field(ge=1, le=100)] = 20\n    sort: Literal[\"created\", \"-created\", \"priority\", \"-priority\"] = \"-created\"\n\n@router.get(\"/search\")\nasync def search(\n    pg: Annotated[PageQuery, Query()],\n    keyword: Annotated[str | None, Query(min_length=1, max_length=64)] = None,\n    project_id: Annotated[int | None, Query(gt=0)] = None,\n):\n    order = Task.created_at.desc() if pg.sort.startswith(\"-\") else Task.created_at.asc()\n    stmt = select(Task).where(Task.deleted_at.is_(None))\n\n    if project_id:\n        stmt = stmt.where(Task.project_id == project_id)\n    if keyword:\n        # 转义 LIKE 通配符，防止用户输入 \"%\" 造成全表扫描\n        safe = keyword.replace(\"\\\\\", \"\\\\\\\\\").replace(\"%\", \"\\\\%\").replace(\"_\", \"\\\\_\")\n        stmt = stmt.where(Task.title.ilike(f\"%{safe}%\", escape=\"\\\\\"))\n\n    total = await repo.count(stmt)\n    rows = await repo.list(stmt.order_by(order).offset((pg.page - 1) * pg.size).limit(pg.size))\n    return Page.of(rows, total, pg)",
+          "line_notes": [],
+          "api_cards": []
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "slug": "ch04",
+      "title": "4 响应设计",
+      "goal": "控制返回什么、怎么返回、出错怎么返回",
+      "examples": [
+        {
+          "uid": "ch04ex01",
+          "order": 1,
+          "heading": "4. 响应：输出契约与错误语义",
+          "context": "out.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from typing import Annotated\nfrom fastapi import FastAPI, Path\nfrom pydantic import BaseModel, ConfigDict\n\nclass UserOut(BaseModel):\n    model_config = {\"from_attributes\": True}      # 允许直接从 ORM 对象读属性\n    id: int\n    email: str\n    is_active: bool\n    # 注意：这里没有 password_hash -> 它绝对不可能泄漏到响应里\n\n@app.get(\"/users/{uid}\", response_model=UserOut)\nasync def get_user(uid: Annotated[int, Path(gt=0)]):\n    user = await repo.get(uid)          # 返回的是 ORM 对象，不是 dict\n    return user                         # 自动挑出 UserOut 声明的字段，多余的全丢掉",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch04ex02",
+          "order": 2,
+          "heading": "4. 响应：输出契约与错误语义",
+          "context": "alias.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from pydantic import BaseModel, ConfigDict, Field\n\ndef to_camel(s: str) -> str:\n    w = s.split(\"_\")\n    return w[0] + \"\".join(x.capitalize() for x in w[1:])\n\nclass TaskOut(BaseModel):\n    # 后端 Python 用 snake_case，前端 JS 生态要 camelCase —— 让框架做转换\n    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)\n    id: int\n    created_at: str                     # JSON 里输出为 createdAt\n    due_date: str | None = Field(default=None, serialization_alias=\"dueDate\")",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch04ex03",
+          "order": 3,
+          "heading": "4. 响应：输出契约与错误语义",
+          "context": "responses.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from fastapi import Response\nfrom fastapi.responses import FileResponse, JSONResponse, StreamingResponse\n\n@app.delete(\"/tasks/{tid}\", status_code=204)\nasync def delete_task(tid: int):\n    ...\n    return Response(status_code=204)     # 必须显式 Response 才是真的空 body\n\n@app.get(\"/tasks/export\")\nasync def export():\n    gen = (f\"{r.id},{r.title}\\n\" for r in iter_rows())     # 生成器，边生成边发\n    return StreamingResponse(gen, media_type=\"text/csv\",\n                             headers={\"Content-Disposition\": 'attachment; filename=\"t.csv\"'})\n\n@app.get(\"/download/{fid}\", response_class=FileResponse)\nasync def download(fid: int):\n    return FileResponse(f\"/data/{fid}.pdf\", filename=\"report.pdf\")\n\n@app.post(\"/tasks\", status_code=201, response_model=TaskOut)\nasync def create(payload: TaskCreate, res: Response):\n    ...   # REST 规范：创建成功可返回 Location 头指向新资源",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch04ex04",
+          "order": 4,
+          "heading": "4. 响应：输出契约与错误语义",
+          "context": "schemas/page.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from typing import Generic, TypeVar\nfrom pydantic import BaseModel\n\nT = TypeVar(\"T\")\n\nclass Page(BaseModel, Generic[T]):\n    items: list[T]\n    total: int\n    page: int\n    size: int\n    pages: int\n\n    @classmethod\n    def of(cls, rows: list, total: int, pg) -> \"Page[T]\":\n        return cls(items=rows, total=total, page=pg.page, size=pg.size,\n                   pages=max(1, -(-total // pg.size)))     # 向上取整的小技巧",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch04ex05",
+          "order": 5,
+          "heading": "4. 响应：输出契约与错误语义",
+          "context": "使用泛型 response_model",
+          "lang": "python",
+          "runnable": true,
+          "code": "@router.get(\"/tasks\", response_model=Page[TaskOut])\nasync def list_tasks(pg: Annotated[PageQuery, Query()]) -> Page[TaskOut]:\n    rows, total = await repo.page(pg)\n    return Page.of(rows, total, pg)",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch04ex06",
+          "order": 6,
+          "heading": "4. 响应：输出契约与错误语义",
+          "context": "errors.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from fastapi import HTTPException\n\n@app.get(\"/tasks/{tid}\")\nasync def get_task(tid: int):\n    task = await repo.get(tid)\n    if task is None:\n        # detail 可以是 dict：放机器可读的错误码，前端据此分支处理\n        raise HTTPException(\n            status_code=404,\n            detail={\"code\": \"TASK_NOT_FOUND\", \"message\": f\"task {tid} not found\"},\n            headers={\"X-Error-Id\": new_trace_id()},       # 便于客服对着日志查\n        )\n    return task",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch04ex07",
+          "order": 7,
+          "heading": "4. 响应：输出契约与错误语义",
+          "context": "routers/tasks.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "@router.post(\n    \"/tasks\",\n    response_model=TaskOut,\n    status_code=201,\n    summary=\"创建任务\",\n    description=\"同一用户下标题重复会返回 409。\",\n    responses={\n        409: {\"description\": \"标题重复\", \"model\": ErrorDetail},\n        422: {\"description\": \"参数校验失败\"},\n    },\n)\nasync def create_task(payload: TaskCreate): ...",
+          "line_notes": [],
+          "api_cards": []
+        }
+      ]
+    },
+    {
+      "index": 5,
+      "slug": "ch05",
+      "title": "5 依赖注入",
+      "goal": "理解 FastAPI 的灵魂机制 Depends",
+      "examples": [
+        {
+          "uid": "ch05ex01",
+          "order": 1,
+          "heading": "5. 依赖注入 Depends：FastAPI 的灵魂",
+          "context": "without.py — 没有 Depends 的世界",
+          "lang": "python",
+          "runnable": true,
+          "code": "@app.get(\"/orders\")\nasync def list_orders(request: Request, page: int = 1):\n    raw = request.headers.get(\"Authorization\", \"\")\n    token = raw.removeprefix(\"Bearer \")\n    user = await parse_token(token)          # 每个接口都要抄一遍\n    db = await get_session()                 # 每个接口都要记得关\n    skip = (page - 1) * 20                   # 每个接口都要算一遍\n    ...",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch05ex02",
+          "order": 2,
+          "heading": "5. 依赖注入 Depends：FastAPI 的灵魂",
+          "context": "with.py — 用 Depends",
+          "lang": "python",
+          "runnable": true,
+          "code": "from typing import Annotated\nfrom fastapi import Depends\n\n@router.get(\"/orders\", response_model=Page[OrderOut])\nasync def list_orders(\n    db: Annotated[AsyncSession, Depends(get_db)],     # 自动开、自动关\n    user: Annotated[User, Depends(current_user)],     # 自动鉴权\n    pg: Annotated[PageQuery, Depends(page_params)],   # 自动分页\n):\n    return await order_service.list(db, user, pg)     # 函数体干净得让人开心",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch05ex03",
+          "order": 3,
+          "heading": "5. 依赖注入 Depends：FastAPI 的灵魂",
+          "context": "three_styles.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from fastapi import APIRouter, Depends\n\n# A. 参数级（最常用）：需要用到依赖的结果\nasync def handler(db: Annotated[AsyncSession, Depends(get_db)]): ...\n\n# B. 路由级：只做检查，不注入结果（例如\"必须登录\"）\n@router.get(\"/wallet\", dependencies=[Depends(current_user)])\nasync def wallet(db: Annotated[AsyncSession, Depends(get_db)]): ...\n\n# C. 路由器级：一整块接口共用一组前置条件\nadmin_router = APIRouter(prefix=\"/admin\", dependencies=[Depends(require_admin)])\napp.include_router(admin_router)",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch05ex04",
+          "order": 4,
+          "heading": "5. 依赖注入 Depends：FastAPI 的灵魂",
+          "context": "db/session.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from collections.abc import AsyncIterator\nfrom sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker\n\nSessionLocal = async_sessionmaker(engine, expire_on_commit=False)\n\nasync def get_db() -> AsyncIterator[AsyncSession]:\n    async with SessionLocal() as session:\n        try:\n            yield session          # yield 之前 = 请求开始前；之后 = 响应发完后\n            await session.commit()\n        except Exception:\n            await session.rollback()      # 业务抛异常自动回滚\n            raise",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch05ex05",
+          "order": 5,
+          "heading": "5. 依赖注入 Depends：FastAPI 的灵魂",
+          "context": "cache.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "async def expensive() -> int:\n    print(\"running\")            # 同一请求内只会打印一次\n    return 42\n\nasync def handler(\n    x: Annotated[int, Depends(expensive)],\n    y: Annotated[int, Depends(expensive)],        # 命中缓存，复用同一结果\n): ...\n\n# 确实需要各算一次：\n    y: Annotated[int, Depends(expensive, use_cache=False)]",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch05ex06",
+          "order": 6,
+          "heading": "5. 依赖注入 Depends：FastAPI 的灵魂",
+          "context": "api/deps/auth.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from typing import Annotated\nfrom fastapi import Depends, HTTPException, status\nfrom fastapi.security import HTTPBearer, HTTPAuthorizationCredentials\n\nbearer = HTTPBearer(auto_error=False)          # auto_error=False 才允许\"可选登录\"\n\nasync def current_user(\n    cred: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],\n    db: Annotated[AsyncSession, Depends(get_db)],\n) -> User:\n    if cred is None:\n        raise HTTPException(status.HTTP_401_UNAUTHORIZED, \"not authenticated\",\n                            headers={\"WWW-Authenticate\": \"Bearer\"})\n    payload = decode_jwt(cred.credentials)     # 无效 / 过期 -> 内部 raise 401\n    user = await db.get(User, int(payload[\"sub\"]))\n    if user is None or not user.is_active:\n        raise HTTPException(status.HTTP_401_UNAUTHORIZED, \"user unavailable\")\n    return user\n\nasync def optional_user(\n    cred: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],\n    db: Annotated[AsyncSession, Depends(get_db)],\n) -> User | None:\n    \"\"\"游客可看、登录可点赞的场景。\"\"\"\n    if cred is None:\n        return None\n    try:\n        return await current_user(cred, db)\n    except HTTPException:\n        return None\n\ndef require_role(*roles: str):                 # 依赖工厂：返回一个依赖\n    async def checker(user: Annotated[User, Depends(current_user)]) -> User:\n        if not set(roles) & set(user.roles):\n            raise HTTPException(status.HTTP_403_FORBIDDEN, \"insufficient role\")\n        return user\n    return checker\n\n@router.delete(\"/{tid}\", dependencies=[Depends(require_role(\"admin\", \"owner\"))])\nasync def delete_task(tid: int): ...",
+          "line_notes": [],
+          "api_cards": []
+        }
+      ]
+    },
+    {
+      "index": 6,
+      "slug": "ch06",
+      "title": "6 工程分层",
+      "goal": "从单文件到可维护的多模块项目",
+      "examples": [
+        {
+          "uid": "ch06ex01",
+          "order": 1,
+          "heading": "6. 工程结构：怎么把 1200 行的 main.py 拆开",
+          "context": "项目结构 text",
+          "lang": "text",
+          "runnable": false,
+          "code": "task-service/\n|-- app/\n|   |-- __init__.py\n|   |-- main.py                 # 只做三件事：建 app、挂中间件、注册路由\n|   |-- api/\n|   |   |-- deps.py             # 公共依赖（db / current_user / pagination）\n|   |   '-- v1/\n|   |       |-- router.py       # 汇总所有子路由\n|   |       '-- endpoints/\n|   |           |-- auth.py     # 一个业务一个文件\n|   |           |-- tasks.py\n|   |           '-- users.py\n|   |-- core/\n|   |   |-- config.py           # Settings（读 .env）\n|   |   |-- security.py         # JWT / 密码哈希\n|   |   |-- exceptions.py       # 领域异常\n|   |   '-- logging.py          # 日志配置\n|   |-- db/\n|   |   |-- base.py             # DeclarativeBase\n|   |   |-- session.py          # engine / sessionmaker / get_db\n|   |   '-- models/             # ORM 表模型\n|   |-- schemas/                # Pydantic 出入参（DTO）\n|   |-- repositories/           # 只跟 SQLAlchemy 打交道\n|   '-- services/               # 业务逻辑，绝不 import fastapi\n|-- tests/\n|-- alembic/                    # 数据库迁移\n|-- .env.example\n|-- pyproject.toml\n'-- Dockerfile",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch06ex02",
+          "order": 2,
+          "heading": "6. 工程结构：怎么把 1200 行的 main.py 拆开",
+          "context": "app/core/config.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from functools import lru_cache\nfrom pydantic import Field, computed_field\nfrom pydantic_settings import BaseSettings, SettingsConfigDict   # pip install pydantic-settings\n\nclass Settings(BaseSettings):\n    model_config = SettingsConfigDict(env_file=\".env\", env_file_encoding=\"utf-8\",\n                                      extra=\"ignore\", case_sensitive=False)\n\n    app_name: str = \"task-service\"\n    env: str = Field(\"dev\", pattern=\"^(dev|staging|prod)$\")\n    debug: bool = False\n    api_prefix: str = \"/api/v1\"\n\n    database_url: str = \"sqlite+aiosqlite:///./dev.db\"\n    db_pool_size: int = 10\n    redis_url: str = \"redis://localhost:6379/0\"\n\n    secret_key: str = Field(min_length=32)      # 不给默认值 -> 忘配就启动失败（好事）\n    access_token_expire_minutes: int = 30\n\n    cors_origins: list[str] = [\"http://localhost:5173\"]\n\n    @computed_field\n    @property\n    def is_prod(self) -> bool:\n        return self.env == \"prod\"\n\n@lru_cache            # 关键：全进程只解析一次 .env，注入依赖时零开销\ndef get_settings() -> Settings:\n    return Settings()",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch06ex03",
+          "order": 3,
+          "heading": "6. 工程结构：怎么把 1200 行的 main.py 拆开",
+          "context": "app/api/v1/router.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from fastapi import APIRouter\nfrom app.api.v1.endpoints import auth, tasks, users\n\napi_router = APIRouter()\napi_router.include_router(auth.router,  prefix=\"/auth\",  tags=[\"auth\"])\napi_router.include_router(tasks.router, prefix=\"/tasks\", tags=[\"tasks\"])\napi_router.include_router(users.router, prefix=\"/users\", tags=[\"users\"])",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch06ex04",
+          "order": 4,
+          "heading": "6. 工程结构：怎么把 1200 行的 main.py 拆开",
+          "context": "app/main.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from contextlib import asynccontextmanager\nfrom fastapi import FastAPI\nfrom fastapi.middleware.cors import CORSMiddleware\n\nfrom app.api.v1.router import api_router\nfrom app.core.config import get_settings\nfrom app.core.logging import setup_logging\nfrom app.db import session as db_session\n\nsettings = get_settings()\n\n@asynccontextmanager\nasync def lifespan(app: FastAPI):\n    \"\"\"启动期准备资源、关闭期释放。取代已废弃的 @app.on_event。\"\"\"\n    setup_logging(settings.debug)\n    app.state.db_engine = db_session.engine\n    await warmup(db_session.engine)          # 建连接池 / 检查表结构\n    try:\n        yield\n    finally:\n        await db_session.engine.dispose()    # 优雅退出：释放连接池\n\ndef create_app() -> FastAPI:\n    app = FastAPI(\n        title=\"Task Service\",\n        version=\"1.0.0\",\n        openapi_url=f\"{settings.api_prefix}/openapi.json\",\n        docs_url=None if settings.is_prod else \"/docs\",\n        lifespan=lifespan,\n    )\n    app.add_middleware(CORSMiddleware,\n                       allow_origins=settings.cors_origins,\n                       allow_credentials=True,\n                       allow_methods=[\"GET\", \"POST\", \"PATCH\", \"DELETE\"],\n                       allow_headers=[\"Authorization\", \"Content-Type\", \"X-Trace-Id\"])\n    app.include_router(api_router, prefix=settings.api_prefix)\n    return app\n\napp = create_app()          # uvicorn 找的就是这个名为 app 的变量",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch06ex05",
+          "order": 5,
+          "heading": "6. 工程结构：怎么把 1200 行的 main.py 拆开",
+          "context": "app/api/v1/endpoints/tasks.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "router = APIRouter()\n\n@router.post(\"\", response_model=TaskOut, status_code=201)\nasync def create_task(\n    payload: TaskCreate,\n    db: Annotated[AsyncSession, Depends(get_db)],\n    user: Annotated[User, Depends(current_user)],\n):\n    task = await task_service.create(db, user=user, payload=payload)\n    await db.commit()\n    return task",
+          "line_notes": [],
+          "api_cards": []
+        }
+      ]
+    },
+    {
+      "index": 7,
+      "slug": "ch07",
+      "title": "7 数据库",
+      "goal": "SQLAlchemy 2.0 + 事务 + 迁移",
+      "examples": [
+        {
+          "uid": "ch07ex01",
+          "order": 1,
+          "heading": "7. 数据库：SQLAlchemy 2.0 实战",
+          "context": "app/db/models/task.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from datetime import UTC, datetime\nfrom sqlalchemy import DateTime, ForeignKey, String, Text, func\nfrom sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship\n\nclass Base(DeclarativeBase):\n    pass\n\nclass Task(Base):\n    __tablename__ = \"tasks\"\n\n    id: Mapped[int] = mapped_column(primary_key=True)\n    title: Mapped[str] = mapped_column(String(200), index=True)\n    description: Mapped[str | None] = mapped_column(Text)\n    priority: Mapped[int] = mapped_column(default=3)                    # 1 最高\n    done: Mapped[bool] = mapped_column(default=False, index=True)\n    owner_id: Mapped[int] = mapped_column(ForeignKey(\"users.id\"), index=True)\n    project_id: Mapped[int | None] = mapped_column(ForeignKey(\"projects.id\"))\n\n    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),\n                                                 server_default=func.now())\n    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),\n                                                 server_default=func.now(), onupdate=func.now())\n    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 软删除\n\n    owner: Mapped[\"User\"] = relationship(back_populates=\"tasks\")\n    project: Mapped[\"Project | None\"] = relationship(back_populates=\"tasks\")\n\n    def soft_delete(self) -> None:\n        self.deleted_at = datetime.now(UTC)",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch07ex02",
+          "order": 2,
+          "heading": "7. 数据库：SQLAlchemy 2.0 实战",
+          "context": "app/repositories/task.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from sqlalchemy import Select, func, select\nfrom sqlalchemy.ext.asyncio import AsyncSession\n\nfrom app.db.models.task import Task\n\nclass TaskRepo:\n    def __init__(self, db: AsyncSession):\n        self.db = db\n\n    def _visible(self) -> Select:                    # 软删除过滤统一收口\n        return select(Task).where(Task.deleted_at.is_(None))\n\n    def _apply(self, stmt: Select, f: TaskFilter) -> Select:\n        if f.done is not None:\n            stmt = stmt.where(Task.done.is_(f.done))\n        if f.owner_id:\n            stmt = stmt.where(Task.owner_id == f.owner_id)\n        if f.min_priority is not None:\n            stmt = stmt.where(Task.priority >= f.min_priority)\n        return stmt\n\n    async def page(self, f: TaskFilter, skip: int, limit: int) -> tuple[list[Task], int]:\n        stmt = self._apply(self._visible(), f)\n        total = await self.db.scalar(\n            select(func.count()).select_from(stmt.order_by(None).subquery())\n        )\n        rows = await self.db.scalars(\n            stmt.order_by(Task.priority, Task.created_at.desc()).offset(skip).limit(limit)\n        )\n        return list(rows), total or 0\n\n    async def get_for_owner(self, tid: int, uid: int) -> Task | None:\n        return await self.db.scalar(self._visible().where(Task.id == tid, Task.owner_id == uid))\n\n    async def create(self, **data) -> Task:\n        task = Task(**data)\n        self.db.add(task)\n        await self.db.flush()          # flush 拿到自增 id，但事务仍未结束\n        return task",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch07ex03",
+          "order": 3,
+          "heading": "7. 数据库：SQLAlchemy 2.0 实战",
+          "context": "app/services/task.py + core/exceptions.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "# ---- core/exceptions.py：领域异常，与 HTTP 解耦 ----\nclass BusinessError(Exception):\n    def __init__(self, code: str, message: str, status_code: int = 400):\n        self.code, self.message, self.status_code = code, message, status_code\n        super().__init__(message)\n\nclass NotFound(BusinessError):\n    def __init__(self, code: str, message: str):\n        super().__init__(code, message, status_code=404)\n\n# ---- services/task.py ----\nclass TaskService:\n    MAX_ACTIVE = 200\n\n    def __init__(self, repo: TaskRepo):\n        self.repo = repo\n\n    async def create(self, *, user: User, payload: TaskCreate) -> Task:\n        _, active = await self.repo.page(TaskFilter(owner_id=user.id, done=False), 0, 1)\n        if active >= self.MAX_ACTIVE:\n            raise BusinessError(\"TASK_LIMIT_EXCEEDED\", \"active task limit is 200\")\n        return await self.repo.create(**payload.model_dump(), owner_id=user.id)\n\n    async def finish(self, tid: int, user: User) -> Task:\n        task = await self.repo.get_for_owner(tid, user.id)\n        if task is None:\n            raise NotFound(\"TASK_NOT_FOUND\", f\"task {tid} not found\")\n        task.done = True\n        return task",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch07ex04",
+          "order": 4,
+          "heading": "7. 数据库：SQLAlchemy 2.0 实战",
+          "context": "n_plus_one.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from sqlalchemy import select\nfrom sqlalchemy.orm import selectinload\n\n# 1 次查列表 + N 次查 owner；1000 条 = 1001 次 SQL\nrows = await db.scalars(select(Task).limit(1000))\nfor t in rows:\n    print(t.owner.email)                 # 每次访问都偷偷发一条 SQL\n\n# 一次 JOIN 带出来\nstmt = select(Task).options(selectinload(Task.owner)).limit(1000)\n\n# 只要两个字段时，直接投影更省\nstmt = select(Task.id, Task.title, User.email).join(User).where(User.id == uid)",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch07ex05",
+          "order": 5,
+          "heading": "7. 数据库：SQLAlchemy 2.0 实战",
+          "context": "terminal",
+          "lang": "bash",
+          "runnable": false,
+          "code": "$ pip install alembic\n$ alembic init alembic\n$ # alembic/env.py 里把 target_metadata 指向 Base.metadata，并 import 所有 models\n$ alembic revision --autogenerate -m \"add tasks table\"\n$ alembic upgrade head\n$ alembic downgrade -1        # 回滚一版：先想清楚再按",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch07ex06",
+          "order": 6,
+          "heading": "7. 数据库：SQLAlchemy 2.0 实战",
+          "context": "app/db/session.py（生产片段）",
+          "lang": "python",
+          "runnable": true,
+          "code": "engine = create_async_engine(\n    settings.database_url,\n    pool_size=settings.db_pool_size,          # 常驻连接\n    max_overflow=5,                           # 突发可借用\n    pool_timeout=5,                           # 拿不到连接快速失败，而不是压垮 DB\n    pool_recycle=1800,                        # 30 分钟重建，绕开 LB / DB 的 idle 断连\n    pool_pre_ping=True,                       # 取用前 ping 一次，避免 \"gone away\"\n    connect_args={\"server_settings\": {\"application_name\": settings.app_name}},\n)",
+          "line_notes": [],
+          "api_cards": []
+        }
+      ]
+    },
+    {
+      "index": 8,
+      "slug": "ch08",
+      "title": "8 登录鉴权",
+      "goal": "JWT 登录、密码哈希、权限、CORS",
+      "examples": [
+        {
+          "uid": "ch08ex01",
+          "order": 1,
+          "heading": "8. 认证与授权",
+          "context": "app/core/security.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from datetime import UTC, datetime, timedelta\nfrom uuid import uuid4\nimport jwt                                   # pip install pyjwt\nfrom pwdlib import PasswordHash              # pip install \"pwdlib[bcrypt]\"\nfrom pwdlib.hashers.bcrypt import BcryptHasher\n\nfrom app.core.config import get_settings\n\npassword_hash = PasswordHash((BcryptHasher(),))\nsettings = get_settings()\n\ndef hash_password(plain: str) -> str:\n    return password_hash.hash(plain)\n\ndef verify_password(plain: str, hashed: str) -> bool:\n    return password_hash.verify(plain, hashed)\n\ndef create_access_token(subject: int, roles: list[str]) -> str:\n    now = datetime.now(UTC)\n    payload = {\n        \"sub\": str(subject),\n        \"roles\": roles,\n        \"iat\": now,\n        \"exp\": now + timedelta(minutes=settings.access_token_expire_minutes),  # 必须写\n        \"jti\": uuid4().hex,                 # 用于吊销 / 审计\n    }\n    return jwt.encode(payload, settings.secret_key, algorithm=\"HS256\")\n\ndef decode_token(token: str) -> dict:\n    try:\n        return jwt.decode(token, settings.secret_key, algorithms=[\"HS256\"])   # 自动校验 exp\n    except jwt.ExpiredSignatureError:\n        raise BusinessError(\"TOKEN_EXPIRED\", \"login expired\", status_code=401)\n    except jwt.InvalidTokenError:\n        raise BusinessError(\"TOKEN_INVALID\", \"invalid token\", status_code=401)",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch08ex02",
+          "order": 2,
+          "heading": "8. 认证与授权",
+          "context": "app/api/v1/endpoints/auth.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from typing import Annotated\nfrom fastapi import APIRouter, Depends, HTTPException, status\nfrom fastapi.security import OAuth2PasswordRequestForm\nfrom pydantic import BaseModel\n\nrouter = APIRouter()\n\nclass TokenOut(BaseModel):\n    access_token: str\n    token_type: str = \"bearer\"\n    expires_in: int\n    roles: list[str]\n\n@router.post(\"/register\", response_model=TokenOut, status_code=201)\nasync def register(payload: RegisterIn, db: Annotated[AsyncSession, Depends(get_db)]):\n    if await user_repo.exists_email(db, payload.email):\n        # 安全考虑：不暴露\"该邮箱已注册\"，防账号枚举。产品体验靠验证码而不是靠提示\n        raise HTTPException(status.HTTP_409_CONFLICT, \"registration failed\")\n    user = await user_service.create(db, email=payload.email,\n                                     hashed=hash_password(payload.password))\n    await db.commit()\n    return await issue_token(user)\n\n@router.post(\"/login\", response_model=TokenOut)\nasync def login(\n    form: Annotated[OAuth2PasswordRequestForm, Depends()],   # 表单字段 username / password\n    db: Annotated[AsyncSession, Depends(get_db)],\n):\n    user = await user_repo.get_by_email(db, form.username)\n    # 无论\"用户不存在\"还是\"密码错\"，都返回同一个信息 -> 防账号枚举\n    if user is None or not verify_password(form.password, user.password_hash):\n        raise HTTPException(status.HTTP_401_UNAUTHORIZED, \"incorrect email or password\",\n                            headers={\"WWW-Authenticate\": \"Bearer\"})\n    if not user.is_active:\n        raise HTTPException(status.HTTP_403_FORBIDDEN, \"account disabled\")\n    return await issue_token(user)",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch08ex03",
+          "order": 3,
+          "heading": "8. 认证与授权",
+          "context": "对象级权限 —— 比角色更重要的一层",
+          "lang": "python",
+          "runnable": true,
+          "code": "@router.get(\"/tasks/{tid}\", response_model=TaskOut)\nasync def get_task(\n    tid: int,\n    db: Annotated[AsyncSession, Depends(get_db)],\n    user: Annotated[User, Depends(current_user)],\n):\n    task = await task_repo.get(db, tid)\n    if task is None:\n        raise NotFound(\"TASK_NOT_FOUND\", f\"task {tid} not found\")\n    if task.owner_id != user.id and not user.has_role(\"admin\"):\n        # 用 404 而不是 403：不让别人通过状态码探测资源是否存在\n        raise NotFound(\"TASK_NOT_FOUND\", f\"task {tid} not found\")\n    return task",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch08ex04",
+          "order": 4,
+          "heading": "8. 认证与授权",
+          "context": "错误 → 正确",
+          "lang": "text",
+          "runnable": false,
+          "code": "# 浏览器会拒绝：allow_credentials=True 时 origins 不能是 \"*\"\napp.add_middleware(CORSMiddleware, allow_origins=[\"*\"], allow_credentials=True)   # 错\n\napp.add_middleware(                                    # 对\n    CORSMiddleware,\n    allow_origins=[\"https://app.example.com\", \"http://localhost:5173\"],\n    allow_credentials=True,\n    allow_methods=[\"*\"],                # 生产建议显式列举\n    allow_headers=[\"*\"],\n    expose_headers=[\"X-Trace-Id\"],      # 想让前端读到自定义头，必须 expose\n    max_age=600,                        # 预检结果缓存，减少 OPTIONS 请求\n)",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch08ex05",
+          "order": 5,
+          "heading": "8. 认证与授权",
+          "context": "api/deps/ratelimit.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "import hashlib\nfrom typing import Annotated\nfrom fastapi import Depends, HTTPException, Request\nfrom redis.asyncio import Redis\n\nasync def login_rate_limit(request: Request, redis: Annotated[Redis, Depends(get_redis)]):\n    \"\"\"固定窗口：同一 IP + 账号，5 分钟内 5 次即拒。生产要再加滑动窗口 / 令牌桶。\"\"\"\n    ip = request.client.host if request.client else \"unknown\"\n    account = (await request.form()).get(\"username\", \"\")\n    key = f\"rl:login:{ip}:{hashlib.sha256(account.encode()).hexdigest()[:16]}\"\n    count = await redis.incr(key)\n    if count == 1:\n        await redis.expire(key, 300)\n    if count > 5:\n        raise HTTPException(429, \"too many attempts, try later\",\n                            headers={\"Retry-After\": \"900\"})",
+          "line_notes": [],
+          "api_cards": []
+        }
+      ]
+    },
+    {
+      "index": 9,
+      "slug": "ch09",
+      "title": "9 中间件与异常",
+      "goal": "统一响应体、日志追踪、后台任务",
+      "examples": [
+        {
+          "uid": "ch09ex01",
+          "order": 1,
+          "heading": "9. 中间件、全局异常、日志与后台任务",
+          "context": "执行顺序 text",
+          "lang": "text",
+          "runnable": false,
+          "code": "Request\n  -> 中间件栈（后 add 的先执行，CORS 通常要在最外层）\n  -> 路由匹配（自上而下，先注册先匹配）\n  -> 依赖链执行（yield 之前部分）\n  -> 请求校验（失败 -> 直接 422，不进入函数）\n  -> 路由函数\n  -> 响应序列化（response_model）\n  -> 依赖 yield 之后部分（提交事务 / 关闭 session）\n  -> 中间件响应阶段（记录耗时、写响应头）\n  -> BackgroundTasks（响应已经发给客户端之后）",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch09ex02",
+          "order": 2,
+          "heading": "9. 中间件、全局异常、日志与后台任务",
+          "context": "app/core/middleware.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "import logging, time, uuid\nfrom contextvars import ContextVar\nfrom starlette.middleware.base import BaseHTTPMiddleware\n\nlog = logging.getLogger(\"app.access\")\nrequest_id: ContextVar[str] = ContextVar(\"request_id\", default=\"-\")\n\nclass AccessLogMiddleware(BaseHTTPMiddleware):\n    async def dispatch(self, request, call_next):\n        rid = request.headers.get(\"X-Trace-Id\") or uuid.uuid4().hex[:16]\n        token = request_id.set(rid)             # 同请求内任意位置都能读到它\n        start = time.perf_counter()\n        status = 500\n        try:\n            response = await call_next(request)\n            status = response.status_code\n        except Exception:\n            log.exception(\"unhandled error\", extra={\"path\": request.url.path})\n            raise\n        finally:\n            cost = (time.perf_counter() - start) * 1000\n            request_id.reset(token)\n        response.headers[\"X-Trace-Id\"] = rid\n        response.headers[\"X-Process-Time\"] = f\"{cost:.2f}ms\"\n        log.info(\"access\", extra={\"path\": request.url.path,\n                                  \"cost_ms\": round(cost, 2), \"status\": status})\n        return response",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch09ex03",
+          "order": 3,
+          "heading": "9. 中间件、全局异常、日志与后台任务",
+          "context": "app/core/logging.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "import json, logging, sys\nfrom app.core.middleware import request_id\n\nclass JsonFormatter(logging.Formatter):\n    def format(self, record: logging.LogRecord) -> str:\n        payload = {\n            \"ts\": self.formatTime(record, \"%Y-%m-%dT%H:%M:%S%z\"),\n            \"level\": record.levelname,\n            \"logger\": record.name,\n            \"rid\": request_id.get(),\n            \"msg\": record.getMessage(),\n        }\n        for k in (\"path\", \"cost_ms\", \"status\", \"uid\"):\n            if hasattr(record, k):\n                payload[k] = getattr(record, k)\n        return json.dumps(payload, ensure_ascii=False, default=str)\n\ndef setup_logging(debug: bool = False) -> None:\n    h = logging.StreamHandler(sys.stdout)        # 容器里日志走 stdout，交给平台收集\n    h.setFormatter(JsonFormatter())\n    root = logging.getLogger()\n    root.handlers = [h]\n    root.setLevel(logging.DEBUG if debug else logging.INFO)",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch09ex04",
+          "order": 4,
+          "heading": "9. 中间件、全局异常、日志与后台任务",
+          "context": "app/core/handlers.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "import logging\nfrom fastapi import FastAPI, Request\nfrom fastapi.exceptions import RequestValidationError\nfrom fastapi.responses import JSONResponse\nfrom sqlalchemy.exc import IntegrityError\n\nfrom app.core.exceptions import BusinessError\nfrom app.core.middleware import request_id\n\ndef register_handlers(app: FastAPI) -> None:\n\n    @app.exception_handler(BusinessError)\n    async def business_error(_: Request, exc: BusinessError):\n        return JSONResponse(status_code=exc.status_code,\n                            content={\"ok\": False, \"code\": exc.code, \"message\": exc.message,\n                                     \"trace_id\": request_id.get()})\n\n    @app.exception_handler(RequestValidationError)\n    async def validation_error(_: Request, exc: RequestValidationError):\n        # 把 FastAPI 默认的 422 结构翻译成前端友好的形式\n        fields: dict[str, list[str]] = {}\n        for e in exc.errors():\n            loc = \".\".join(str(p) for p in e[\"loc\"][1:]) or \"body\"\n            fields.setdefault(loc, []).append(e[\"msg\"])\n        return JSONResponse(status_code=422,\n                            content={\"ok\": False, \"code\": \"VALIDATION_ERROR\",\n                                     \"message\": \"invalid parameters\", \"fields\": fields})\n\n    @app.exception_handler(IntegrityError)\n    async def integrity_error(_: Request, exc: IntegrityError):\n        return JSONResponse(status_code=409,\n                            content={\"ok\": False, \"code\": \"CONFLICT\", \"message\": \"data conflict\"})\n\n    @app.exception_handler(Exception)          # 兜底：不泄漏堆栈给客户端，但一定记日志\n    async def unknown(_: Request, exc: Exception):\n        logging.getLogger(\"app\").exception(\"unhandled\")\n        return JSONResponse(status_code=500,\n                            content={\"ok\": False, \"code\": \"INTERNAL\",\n                                     \"message\": \"server error\", \"trace_id\": request_id.get()})",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch09ex05",
+          "order": 5,
+          "heading": "9. 中间件、全局异常、日志与后台任务",
+          "context": "background.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from typing import Annotated\nfrom fastapi import BackgroundTasks, Depends\n\nasync def send_email(to: str, subject: str) -> None: ...\n\nasync def audit(factory, uid: int, action: str) -> None:\n    async with factory() as db:            # 新开 session，别复用请求的那个\n        db.add(AuditLog(uid=uid, action=action))\n        await db.commit()\n\n@router.post(\"/tasks\", status_code=201)\nasync def create(\n    payload: TaskCreate,\n    bg: BackgroundTasks,\n    db: Annotated[AsyncSession, Depends(get_db)],\n    user: Annotated[User, Depends(current_user)],\n):\n    task = await task_service.create(user=user, payload=payload)\n    await db.commit()\n    bg.add_task(send_email, to=user.email, subject=\"任务已创建\")   # 响应先返回\n    bg.add_task(audit, SessionLocal, user.id, \"task.create\")\n    return task",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch09ex06",
+          "order": 6,
+          "heading": "9. 中间件、全局异常、日志与后台任务",
+          "context": "sse.py — AI / 日志类应用必备",
+          "lang": "python",
+          "runnable": true,
+          "code": "import json\nfrom fastapi import APIRouter, Depends\nfrom fastapi.responses import StreamingResponse\n\n@router.get(\"/stream/{job_id}\")\nasync def stream(job_id: int, db: Annotated[AsyncSession, Depends(get_db)]):\n    async def gen():\n        async for chunk in job_service.tail(job_id):        # 真实场景从队列 / DB 轮询\n            yield f\"event: message\\ndata: {json.dumps(chunk, ensure_ascii=False)}\\n\\n\"\n        yield \"event: done\\ndata: {}\\n\\n\"\n    return StreamingResponse(gen(), media_type=\"text/event-stream\",\n                             headers={\"Cache-Control\": \"no-cache\", \"X-Accel-Buffering\": \"no\"})",
+          "line_notes": [],
+          "api_cards": []
+        }
+      ]
+    },
+    {
+      "index": 10,
+      "slug": "ch10",
+      "title": "10 测试与部署",
+      "goal": "有测试、能容器化、知道上线检查项",
+      "examples": [
+        {
+          "uid": "ch10ex01",
+          "order": 1,
+          "heading": "10. 测试与部署",
+          "context": "tests/conftest.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "from collections.abc import AsyncIterator\nimport httpx\nimport pytest\nimport pytest_asyncio\nfrom sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine\nfrom sqlalchemy.pool import StaticPool\n\nfrom app.db.base import Base\nfrom app.db.session import get_db\nfrom app.main import create_app\n\npytestmark = pytest.mark.asyncio\n\n@pytest_asyncio.fixture\nasync def db() -> AsyncIterator[AsyncSession]:\n    engine = create_async_engine(\"sqlite+aiosqlite://\",\n                                 poolclass=StaticPool,      # 内存库必须：否则每个连接是不同库\n                                 connect_args={\"check_same_thread\": False})\n    async with engine.begin() as conn:\n        await conn.run_sync(Base.metadata.create_all)\n    Session = async_sessionmaker(engine, expire_on_commit=False)\n    async with Session() as session:\n        yield session\n    await engine.dispose()\n\n@pytest_asyncio.fixture\nasync def client(db: AsyncSession) -> AsyncIterator[httpx.AsyncClient]:\n    app = create_app()\n    app.dependency_overrides[get_db] = lambda: db           # 核心技巧：换掉真实依赖\n    transport = httpx.ASGITransport(app=app)\n    async with httpx.AsyncClient(transport=transport, base_url=\"http://test\") as c:\n        yield c\n    app.dependency_overrides.clear()\n\n@pytest_asyncio.fixture\nasync def headers(client: httpx.AsyncClient) -> dict[str, str]:\n    await client.post(\"/api/v1/auth/register\",\n                      json={\"email\": \"a@b.com\", \"password\": \"Passw0rd!\"})\n    r = await client.post(\"/api/v1/auth/login\",\n                          data={\"username\": \"a@b.com\", \"password\": \"Passw0rd!\"})\n    return {\"Authorization\": f\"Bearer {r.json()['access_token']}\"}",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch10ex02",
+          "order": 2,
+          "heading": "10. 测试与部署",
+          "context": "tests/test_tasks.py — 一个端点覆盖成功/校验/鉴权/越权",
+          "lang": "python",
+          "runnable": true,
+          "code": "async def test_create_task_ok(client, headers):\n    r = await client.post(\"/api/v1/tasks\", headers=headers,\n                          json={\"title\": \"写手册\", \"priority\": 1})\n    assert r.status_code == 201\n    assert r.json()[\"title\"] == \"写手册\"\n    assert \"password\" not in r.text          # 响应里不能出现任何凭据字段\n\nasync def test_create_requires_login(client):\n    r = await client.post(\"/api/v1/tasks\", json={\"title\": \"x\"})\n    assert r.status_code == 401\n\nasync def test_title_validation(client, headers):\n    r = await client.post(\"/api/v1/tasks\", headers=headers, json={\"title\": \"\"})\n    assert r.status_code == 422\n    body = r.json()\n    assert body[\"code\"] == \"VALIDATION_ERROR\"          # 依赖第 9 章的统一错误体\n    assert \"title\" in body[\"fields\"]\n\nasync def test_cannot_touch_others_task(client, headers, other_user_task):\n    r = await client.delete(f\"/api/v1/tasks/{other_user_task.id}\", headers=headers)\n    assert r.status_code == 404                        # 越权必须\"看不见\"",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch10ex03",
+          "order": 3,
+          "heading": "10. 测试与部署",
+          "context": "Dockerfile — 多阶段 + 非 root + 依赖层缓存",
+          "lang": "text",
+          "runnable": false,
+          "code": "# ---------- 依赖构建层 ----------\nFROM python:3.12-slim AS builder\nENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1\nWORKDIR /app\nCOPY pyproject.toml README.md ./\nCOPY app ./app\nRUN pip install --no-cache-dir --prefix=/install .\n\n# ---------- 运行层 ----------\nFROM python:3.12-slim\nENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1\nRUN useradd -m -u 10001 app \\\n && apt-get update && apt-get install -y --no-install-recommends curl \\\n && rm -rf /var/lib/apt/lists/*\nWORKDIR /app\nCOPY --from=builder /install /usr/local\nCOPY --chown=app:app alembic ./alembic\nUSER app\nEXPOSE 8000\nHEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \\\n  CMD curl -fsS http://127.0.0.1:8000/healthz || exit 1\n# 迁移放在发布流程里单独执行，别写进启动命令（多副本会并发跑迁移）\nCMD [\"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\", \"--workers\", \"2\"]",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch10ex04",
+          "order": 4,
+          "heading": "10. 测试与部署",
+          "context": "terminal",
+          "lang": "bash",
+          "runnable": false,
+          "code": "$ uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4\n$ gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 4 --timeout 60 --graceful-timeout 30\n$ fastapi run app/main.py            # 官方生产向封装，默认多 worker + 0.0.0.0",
+          "line_notes": [],
+          "api_cards": []
+        },
+        {
+          "uid": "ch10ex05",
+          "order": 5,
+          "heading": "10. 测试与部署",
+          "context": "terminal",
+          "lang": "bash",
+          "runnable": false,
+          "code": "$ pip install locust && locust -f tests/locustfile.py --headless -u 200 -r 20 -t 60s\n$ wrk -t8 -c200 -d30s http://localhost:8000/api/v1/tasks",
+          "line_notes": [],
+          "api_cards": []
+        }
+      ]
+    },
+    {
+      "index": 11,
+      "slug": "ch11",
+      "title": "11 附录 · 速查",
+      "goal": "报错词典 + 速查表",
+      "examples": [
+        {
+          "uid": "ch11ex01",
+          "order": 1,
+          "heading": "附录：速查表与报错词典",
+          "context": "cheatsheet.py",
+          "lang": "python",
+          "runnable": true,
+          "code": "@router.patch(\"/{task_id}\")                      # 路径参数\nasync def update(\n    task_id: int,                                            # -> path\n    payload: TaskUpdate,                                     # -> JSON body\n    force: Annotated[bool, Query()] = False,                 # -> ?force=true\n    x_device: Annotated[str | None, Header()] = None,        # -> X-Device 头\n    session: Annotated[str | None, Cookie()] = None,         # -> Cookie\n    db: Annotated[AsyncSession, Depends(get_db)] = None,     # -> 依赖注入\n    bg: BackgroundTasks | None = None,                       # -> 特殊类型，框架识别\n): ...",
+          "line_notes": [],
+          "api_cards": []
+        }
+      ]
+    }
+  ]
+}
