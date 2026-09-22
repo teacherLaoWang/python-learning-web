@@ -40,7 +40,7 @@ def assets_version(static_dir: Path) -> str:
     页面上的新规则死活不生效。URL 变了就彻底没这个问题，而且能长期缓存内容本身。
     """
     digest = hashlib.sha1()
-    for name in ("style.css", "app.js"):
+    for name in ("style.css", "prose.js", "app.js"):
         path = static_dir / name
         if path.exists():
             stat = path.stat()

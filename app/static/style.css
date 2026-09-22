@@ -178,6 +178,11 @@ main { display: grid; grid-template-columns: 250px minmax(0, 1fr); align-items: 
 .concept .cbody { padding: 2px 13px 11px 30px; font-size: 13px; color: #cbd5e1; }
 .cbody p { margin: 0 0 8px; }
 .cbody em { color: var(--accent); font-style: normal; }
+.cbody strong,
+.inline-note strong,
+.card strong,
+.card .sum strong { color: #fff; font-weight: 650; }
+.inline-note code { font-size: 11.6px; }
 .cbody code,
 .inline-note code,
 .card .sum code {

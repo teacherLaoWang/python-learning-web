@@ -128,7 +128,7 @@
       { "line": 1, "to": 2, "kind": "note", "text": "wraps 来自 functools，是写装饰器的必备件。" },
       { "line": 4, "kind": "key", "text": "timed 接收一个函数、返回一个函数——这就是装饰器的全部形状。@timed 不过是 timed(slow_query) 的语法糖。" },
       { "line": 5, "kind": "warn", "text": "不加 @wraps(fn) 的话，被装饰函数的 __name__ 会变成 'wrapper'、docstring 丢失。FastAPI 里更实际的影响：路由的 name / operation id / 日志全变成 wrapper，调试时认不出来。" },
-      { "line": 6, "to": 10, "kind": "note", "text": "wrapper 用 *args/**kwargs 原样转发参数：计时 → 调原函数 → 打印耗时 → 把结果返回。" },
+      { "line": 6, "to": 10, "kind": "note", "text": "wrapper 用 `*args` / `**kwargs` 原样转发参数：计时 → 调原函数 → 打印耗时 → 把结果返回。" },
       { "line": 11, "kind": "key", "text": "运行这段会打印 slow_query took 0.20Xs。想复用：存成 timed.py，然后 from timed import timed。" },
       { "line": 13, "to": 15, "kind": "note", "text": "@timed 贴在 def slow_query 上面，于是 slow_query 这个名字最终指向 wrapper。" }
     ],

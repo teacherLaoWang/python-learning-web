@@ -61,14 +61,15 @@ app/
 ├── seed.py          seed.json + notes/*.json → SQLite（幂等 upsert）
 ├── api/content.py   GET /api/meta /chapters /chapters/{i} /examples /examples/{uid}
 ├── api/run.py       POST /api/run /api/calls
-└── static/          index.html · style.css · app.js（无构建、无 CDN、无框架）
+└── static/          index.html · style.css · prose.js（笔记渲染）· app.js（无构建、无 CDN、无框架）
 tools/extract_tutorial.py   教程 HTML → data/seed.json（只用标准库）
 data/
 ├── seed.json        抽取产物（提交进仓库，别人 clone 即用）
 ├── notes/*.json     中文标题 + 逐行解释 + 概念 + API 卡片 —— 内容真相源
 ├── app.db           SQLite（不提交）
 └── runs/<uid>/      例子的工作目录（不提交；同一例子的工作目录会复用）
-tests/               test_sandbox.py（15）· test_probe.py（9）· test_seed.py（6）· test_api.py（20）
+tests/               test_sandbox.py（15）· test_probe.py（9）· test_seed.py（7）· test_api.py（20）
+                     js/prose.test.mjs（15，`node --test tests/js/prose.test.mjs`）
 ```
 
 ## 补内容（这是这个站最有价值的部分）
@@ -117,7 +118,8 @@ tests/               test_sandbox.py（15）· test_probe.py（9）· test_seed.
 - `kind`（concepts）：`base` 基础概念 / `arch` 模块与结构 / `flow` 执行流程 / `compare` 对比，四种颜色左边框不同
 - `to`：一条注释讲 `line` 到 `to` 这一整段，注释挂在这段的最后一行下方
 - 改完 `uv run python -m app.seed` 即可（`--probe` 才会重跑可运行性探测）。重跑不产生重复行，也不丢已有探测结果
-- 概念正文支持「空行分段 / 四空格缩进当代码块 / 反引号行内代码」，不引 markdown 库
+- 概念正文支持「空行分段 / 四空格缩进当代码块（保留块内缩进）/ 反引号行内代码 / `**加粗**` / 行首 `- ` 与 `1. ` 列表」；裸写的 `__init__`、`__annotations__` 自动带代码样式。规则都在 `app/static/prose.js`——单独成文件是为了能被 `node --test` 加载测到，它也是页面唯一的 HTML 生成点（转义规则都在那里）。
+- **故意不支持** `__粗体__` 与 `*斜体*`：内容里大量是 `__init__`、`allow_methods=["*"]`，支持了就会把代码标识符吃掉。`tests/js/prose.test.mjs` 里钉着这两条回归用例
 
 想批量看某个例子的原文和 uid：`uv run python -m app.seed --probe --chapter 7` 的结果表，
 或者直接 `curl 127.0.0.1:8100/api/examples/ch07ex02 | uv run python -m json.tool`。
@@ -156,10 +158,13 @@ tests/               test_sandbox.py（15）· test_probe.py（9）· test_seed.
 ## 测试
 
 ```bash
-uv run pytest              # 50 条：沙箱 15 · 识别与判定 9 · 灌库 6 · 接口 20
+uv run pytest              # 51 条 Python：沙箱 15 · 识别与判定 9 · 灌库与内容 lint 7 · 接口 20
 uv run ruff check app tools tests
-uv run ruff format app tools tests
+node --test tests/js/prose.test.mjs   # 15 条：笔记渲染器（转义、粗体、列表、代码块缩进）
 ```
+
+内容 lint（`test_notes_markup_is_balanced`）会挡住「反引号/`**` 不配对」这类写坏的字句——
+它们不会报错，只会在页面上露出字面标记，靠眼看很难发现。
 
 沙箱那 15 条是执行器的验收标准：正常代码能跑、回溯定位到行号且不掺引导脚本自己的帧、
 死循环 / 卡住 / 吃内存 / 刷屏四种情况都被拦住、asgi 模式真能调到端点并跑 lifespan、

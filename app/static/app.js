@@ -27,8 +27,8 @@ const state = {
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const notesFile = (uid) => (uid.match(/^ch\d{2}/) || ["ch00"])[0];
-const esc = (text) =>
-  String(text).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+/* 渲染规则见 prose.js：esc 转义、prose 排版整段、proseInline 处理单行 */
+const { esc, prose, proseInline } = Prose;
 
 const el = (tag, cls, text) => {
   const node = document.createElement(tag);
@@ -89,33 +89,8 @@ function highlightLine(raw, st3) {
 }
 
 /* ============================ 小段文字排版 ============================ */
-/* 概念正文按「空行分段 + 四空格缩进当代码 + `反引号` 当行内代码」渲染，不引 markdown 库。 */
-
-function prose(text) {
-  const blocks = String(text).replace(/\r/g, "").split(/\n{2,}/);
-  return blocks.map((block) => inline(block.trim())).join("");
-}
-
-function inline(block) {
-  if (!block) return "";
-  const lines = block.split("\n");
-  if (lines.every((ln) => /^\s{4,}\S/.test(ln))) {
-    return `<pre class="mini">${esc(lines.map((ln) => ln.trim()).join("\n"))}</pre>`;
-  }
-  const numbered = lines.filter((ln) => /^\s*\d+\.\s/.test(ln));
-  if (numbered.length >= 2 && numbered.length === lines.filter((l) => l.trim()).length) {
-    return `<ol class="mini">${numbered.map((ln) => `<li>${code(ln.replace(/^\s*\d+\.\s*/, ""))}</li>`).join("")}</ol>`;
-  }
-  if (lines.every((ln) => /^\s*[-•]\s/.test(ln))) {
-    return `<ul class="mini">${lines.map((ln) => `<li>${code(ln.replace(/^\s*[-•]\s/, ""))}</li>`).join("")}</ul>`;
-  }
-  return `<p>${code(lines.join(" "))}</p>`;
-}
-
-const code = (text) =>
-  esc(text)
-    .replace(/`([^`]+)`/g, (_, g) => `<code>${g}</code>`)
-    .replace(/「([^」]+)」/g, (_, g) => `<em>「${g}」</em>`);
+/* 规则在 prose.js（**粗体** / `代码` / 列表分组 / 缩进代码 / 全量转义），
+   单独成文件是为了能被 node --test 直接加载测到。 */
 
 /* ============================ 启动 ============================ */
 
@@ -333,12 +308,9 @@ function renderInlineNote(it) {
   const range = it.to_line > it.line_no ? `${it.line_no}–${it.to_line}` : `${it.line_no}`;
   box.innerHTML =
     `<span class="rng">${range} 行</span>` +
-    `<span class="txt">${code(esc2(it.text))}</span>`;
+    `<span class="txt">${proseInline(it.text)}</span>`;
   return box;
 }
-
-/* 注释文本里可能带 < 之类的字符：先让 esc 处理掉，再把 &lt;还原成可显示的 < */
-const esc2 = (text) => String(text).replace(/</g, "＜");
 
 function focusLine(lineEl, n) {
   const card = lineEl.closest(".ex");
@@ -468,22 +440,26 @@ function renderCard(c) {
   box.innerHTML =
     `<span class="kind">${esc(c.kind)}</span>` +
     `<div class="sig">${esc(c.signature || c.name)}</div>` +
-    `<div class="sum">${code(esc2(c.summary || ""))}</div>`;
+    `<div class="sum">${proseInline(c.summary || "")}</div>`;
   if (c.params?.length) {
     const ul = el("ul");
     for (const p of c.params) {
       const li = el("li");
-      li.innerHTML = `<b>${esc(p.name)}</b>　${esc(p.type || "")}${p.note ? " — " + code(esc2(p.note)) : ""}`;
+      li.innerHTML = `<b>${esc(p.name)}</b>　${esc(p.type || "")}${p.note ? " — " + proseInline(p.note) : ""}`;
       ul.append(li);
     }
     box.append(ul);
   }
   if (c.returns) {
     const ret = el("div", "ret");
-    ret.innerHTML = `<b>返回</b> ${code(esc2(c.returns))}`;
+    ret.innerHTML = `<b>返回</b> ${proseInline(c.returns)}`;
     box.append(ret);
   }
-  if (c.gotcha) box.append(el("div", "gotcha", "⚠ " + c.gotcha));
+  if (c.gotcha) {
+    const g = el("div", "gotcha");
+    g.innerHTML = `⚠ ${proseInline(c.gotcha)}`;
+    box.append(g);
+  }
   return box;
 }
 

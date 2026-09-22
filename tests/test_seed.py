@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from sqlalchemy import func, select
@@ -58,8 +59,12 @@ def test_notes_files_are_discoverable():
 
 def test_broken_notes_file_fails_loudly(tmp_path):
     """notes 文件语法错必须响，不能「跳过 + 报成功」——那会静默吞掉整章解释。"""
-    (tmp_path / "好的.json").write_text('{"ch00ex01": {"title": "x"}}', encoding="utf-8")
-    (tmp_path / "坏括号.json").write_text('{"ch01ex01": {"title": "x"', encoding="utf-8")
+    (tmp_path / "好的.json").write_text(
+        '{"ch00ex01": {"title": "x"}}', encoding="utf-8"
+    )
+    (tmp_path / "坏括号.json").write_text(
+        '{"ch01ex01": {"title": "x"', encoding="utf-8"
+    )
     with pytest.raises(SystemExit) as boom:
         load_notes(tmp_path)
     assert "坏括号.json" in str(boom.value)
@@ -73,6 +78,43 @@ def test_every_chapter_has_some_content():
         by_chapter[uid[:4]] = by_chapter.get(uid[:4], 0) + 1
     assert len(by_chapter) == 12, f"12 章都该有内容，现在只有 {sorted(by_chapter)}"
     assert set(chapters) >= {"ch01", "ch02", "ch03", "ch04", "ch05", "ch06", "ch07"}
+
+
+def test_notes_markup_is_balanced():
+    """内容 lint：标记必须成对，否则页面上会露出字面 ** 或反引号。
+
+    踩过的坑：写了 `wrapper 用 *args/**kwargs 转发` —— 单个 ** 不是粗体，
+    前端只能原样显示；正确写法是给它们加反引号。
+    """
+    offenders: list[str] = []
+    for path in sorted(get_settings().notes_dir.glob("*.json")):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for uid, item in data.items():
+            if uid.startswith("_"):
+                chunks = [
+                    c.get("body", "")
+                    for meta in item.values()
+                    for c in (meta or {}).get("concepts", [])
+                ]
+            else:
+                chunks = [item.get("title", "")]
+                chunks += [c.get("body", "") for c in item.get("concepts", [])]
+                chunks += [n.get("text", "") for n in item.get("line_notes", [])]
+                for card in item.get("api_cards", []):
+                    chunks += [
+                        card.get(k, "") for k in ("summary", "returns", "gotcha")
+                    ]
+                    chunks += [p.get("note", "") for p in card.get("params", [])]
+            for text in chunks:
+                if not text:
+                    continue
+                if text.count("`") % 2:
+                    offenders.append(f"{uid}: 反引号不配对 → {text[:50]}")
+                # 只数代码片段之外的 **：`**kwargs` 里的星号是字面量，渲染器会保护
+                outside = re.sub(r"`[^`\n]+`", "", text)
+                if outside.count("**") % 2:
+                    offenders.append(f"{uid}: ** 不配对 → {outside[:50]}")
+    assert not offenders, "；".join(offenders[:6])
 
 
 def test_seeding_twice_is_idempotent():
@@ -132,16 +174,26 @@ def test_seeding_twice_is_idempotent():
 
 def test_duplicate_line_note_is_named():
     """同一行写了两条解释要指名道姓地报错，而不是抛 SQLAlchemy 回溯。"""
-    notes = {"ch02ex01": {"line_notes": [
-        {"line": 3, "text": "第一条"},
-        {"line": 3, "text": "第二条撞车"},
-    ]}}
+    notes = {
+        "ch02ex01": {
+            "line_notes": [
+                {"line": 3, "text": "第一条"},
+                {"line": 3, "text": "第二条撞车"},
+            ]
+        }
+    }
     init_db()
     payload = json.loads(get_settings().seed_path.read_text(encoding="utf-8"))
     with SessionLocal() as session:
         with pytest.raises(SystemExit) as boom:
-            sync(session, payload, notes, do_probe=False, only_chapter=2,
-                 settings=get_settings())
+            sync(
+                session,
+                payload,
+                notes,
+                do_probe=False,
+                only_chapter=2,
+                settings=get_settings(),
+            )
         session.rollback()
     assert "ch02ex01" in str(boom.value) and "第 3 行" in str(boom.value)
 
