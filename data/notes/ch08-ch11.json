@@ -1,0 +1,435 @@
+{
+  "_chapters": {
+    "ch08": {
+      "concepts": [
+        {
+          "kind": "base",
+          "title": "JWT 是签名不是加密：安全由三个决定构成",
+          "body": "**决定一：payload 是可读的。**token 的第二段只是 base64url，任何人 `jwt.decode` 都能看到内容。签名保证的是「没被篡改」，不是「保密」。所以别把手机号、内部 id、权限快照塞进去。\n\n**决定二：算法与密钥。**HS256 是对称密钥，签发方和校验方共用 `secret_key`——只要有一个校验方被攻破，就能伪造 token。多方/第三方参与验证时换 RS256/ES256（私钥签发、公钥验证）。解码时必须显式传 `algorithms=[\"HS256\"]`：留空或用库默认，历史上就是 `alg: none` 类漏洞的入口。\n\n**决定三：有效期与吊销。**`exp` 必须写（不设就是永久凭证，泄露一次等于账号交出去）；`iat`/`jti` 让「什么时候发的」「能不能提前作废」有抓手。想吊销就得存 jti 黑名单或版本号——纯无状态 JWT 做不到，这是它被换来「不用查库」必然付出的代价。"
+        },
+        {
+          "kind": "base",
+          "title": "口令要慢哈希，不是快哈希",
+          "body": "`sha256(password)` 是错的：它每秒能算几十亿次，且不加盐导致同口令同哈希，一张彩虹表通吃。数据库一旦外泄，弱口令几小时内被还原。\n\n口令存储要用**专门设计的慢哈希**：bcrypt / argon2id / scrypt。它们有两层防护：一是可调的计算成本（cost/memory 参数，让单次验证几十到几百毫秒，攻击者算一亿的代价无法承受），二是自动加盐（同口令不同哈希）。\n\n本站用 pwdlib 而不是 passlib：passlib 1.7.x 与新版 bcrypt 搭配会在读版本号时炸（`AttributeError: module 'bcrypt' has no attribute '__about__'`），是个存在多年未修的兼容问题，教程因此换 pwdlib。另外三条配套实践：**禁止弱口令**（注册时用 zxcvbn 一类测强度）、**登录限流**（第 8 章最后那个例子）、**改密码后让旧 token 失效**（在 claims 里放密码版本号或 token 版本）。"
+        },
+        {
+          "kind": "compare",
+          "title": "认证与授权要落在四个不同位置",
+          "body": "四件事常被混成一句「加个鉴权」：\n\n1. **认证（你是谁）**：`current_user` 依赖，解 token + 查用户 + 判 is_active。失败 401。\n2. **功能授权（你能不能做这件事）**：`require_role(\"admin\")` 挂在路由或 router 上。失败 403。\n3. **对象级授权（这条数据归不归你）**：查的时候把 owner_id 写进条件，或查完比对；越权回 404 以免泄露存在性。**这一层最常被漏**，也是真实事故最多的地方。\n4. **字段级（同一行数据里哪些列你能看）**：出参模型按角色分（`TaskOwnerOut` vs `TaskPublicOut`），不能只靠权限判断。\n\n顺带一句：CORS 不是权限控制，它只约束浏览器；curl 和服务器端 SDK 完全不受影响。真正的门槛永远在服务端。"
+        }
+      ]
+    },
+
+    "ch09": {
+      "concepts": [
+        {
+          "kind": "base",
+          "title": "统一异常处理换到的是「形状一致」和「端点干净」",
+          "body": "不用 handler 时，每个端点自己 try/except、自己决定错误 JSON 长什么样，于是同一个服务里会出现三种错误格式：`{\"detail\": ...}`、`{\"error\": ...}`、`{\"message\": ...}`，前端只能靠猜。\n\n注册 handler 之后：业务层抛领域异常（`BusinessError`），表示层的一个函数负责翻译成 HTTP 状态码 + 统一响应体 + `trace_id`。端点里从此不写错误处理，形状也全局唯一。\n\n四类值得注册：领域异常（→ 语义化 4xx）、`RequestValidationError`（→ 把内置 422 折成前端可用的 `fields` 映射）、数据库 `IntegrityError`（→ 409）、以及 `Exception` 兜底（→ 500 且绝不外泄堆栈）。最后这条同时是**日志锚点**：兜底 handler 里必须 `logger.exception`，否则你会得到「用户说报错了但日志里什么都没有」。"
+        },
+        {
+          "kind": "flow",
+          "title": "洋葱顺序：中间件、路由、依赖、校验、序列化、后台任务",
+          "body": "请求由外向内走：`中间件（后 add 的先执行）→ 路由匹配（自上而下，先注册先匹配）→ 依赖链 → 参数校验 → 端点函数`，然后由内向外走：`响应序列化（response_model）→ 依赖 yield 之后的收尾（提交事务/关连接）→ 中间件响应阶段（写头、记耗时）→ BackgroundTasks（响应已经发给客户端）`。\n\n三个能直接解释线上现象的推论：\n\n1. **校验是按依赖逐个发生的**，不是全链跑完统一校验——所以下游依赖可能已经写过数据库/发过外部调用，才因为端点参数非法而 422。有副作用的依赖要往后放，或保证幂等。\n2. **依赖收尾在响应序列化之后**：`get_db` 的 commit 失败时，客户端可能已经拿到 200。要强一致语义就在端点里显式提交并让 handler 翻译异常。\n3. **BackgroundTasks 在响应之后跑**，所以它拿不到「让客户端等待」的机会，也不共享请求级资源（session 可能已关）。异常只会进日志，不会变成错误响应。"
+        },
+        {
+          "kind": "base",
+          "title": "结构化日志：rid 是唯一索引",
+          "body": "一行一个 JSON 对象，字段固定：时间、级别、logger、消息、以及**请求 id**。最后这个字段决定你排查问题的速度：没有它，只能按时间窗猜哪些日志属于同一次请求。\n\nrid 用 `ContextVar` 传递：异步下每个任务有独立上下文，`threading.local` 不行、全局变量更不行。中间件在入口 `set`、出口 `reset`——只 set 不 reset 会污染同一进程内后续复用的上下文。\n\n另外三条：日志写 stdout 交给平台收集（不要在容器里自己滚动文件）；不要记录密码/token/完整证件号这类字段（列一个「必须脱敏」清单并写测试）；给 uvicorn 的 access log 去重（我们自己打了访问日志，两份并存等于双倍成本）。"
+        },
+        {
+          "kind": "compare",
+          "title": "BaseHTTPMiddleware 还是纯 ASGI 中间件",
+          "body": "`BaseHTTPMiddleware`（本例）写起来像函数、好读，代价是它把每次请求包成新的任务并缓冲响应流：SSE、`StreamingResponse`、文件下载这类长响应经过它会增加开销、也更容易踩取消语义的坑。它是**纯 ASGI 中间件**（手写 `async def __call__(scope, receive, send)`）性能更好、行为更透明，但写起来累。\n\n选择建议：只做「读头、写头、计时、打日志」的薄逻辑，用 BaseHTTPMiddleware 没问题；需要包住流式响应、或性能敏感路径，就写纯 ASGI 中间件，或直接放进依赖里（鉴权类逻辑尤其如此——依赖能拿到 `response_model`、OpenAPI 与 override 全套支持，中间件不能）。\n\n还有一条通用原则：**别在中间件里读请求体**做判断（会破坏流式与大文件上传），要做限流就按路由/依赖粒度，别按 body。"
+        }
+      ]
+    },
+
+    "ch10": {
+      "concepts": [
+        {
+          "kind": "base",
+          "title": "测契约而不是测实现：一条端点测试该覆盖什么",
+          "body": "「测 service 就行了，端点只是转调」这句话对一半：业务规则确实该在 service 层测（快、无 HTTP），但**框架层的行为只有端到端测试能覆盖**：路由有没有挂上、依赖 override 是否生效、鉴权是否真的挡住、422 的错误体是不是那个形状、出参模型有没有把 password 漏出去。\n\n第 10 章那条测试就是标准配方：一个端点测四种结局（成功 / 未登录 / 校验失败 / 越权）。这四条写下来，接口契约就基本钉死了；重构时只要它们绿，就说明「对客户端的行为没变」。"
+        },
+        {
+          "kind": "arch",
+          "title": "容器里的进程模型：worker 数、连接数、迁移时机",
+          "body": "`--workers 4` 是 4 个进程，各自一份事件循环、**各自一套连接池**。数据库总连接数 ≈ 副本数 × worker 数 × (pool_size + max_overflow)。这是最常见的「上线后 DB 连接打满」成因，算一遍再定参数。\n\n迁移不要写进容器启动命令：多副本会并发执行同一条迁移。正确做法是发布流程里的一次性 Job（或平台 release command），先迁移再滚新代码，或让代码向后兼容一个版本。\n\n健康检查用 `/healthz`（存活）而不是 `/readyz`：就绪探针失败时你希望**摘流量**而不是重启，用它当 liveness 会把「数据库抖动」放大成「全部实例重启」。"
+        }
+      ]
+    }
+  },
+
+  "ch08ex01": {
+    "title": "security.py：哈希与签发/校验 token",
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "这个文件是系统里唯一碰密钥的地方",
+        "body": "口令哈希、JWT 签发、JWT 解码都收在 core/security.py：`secret_key` 只有它能读，其他层调用函数而不是自己碰密钥。这样换密钥/换算法/加密钥轮换时改一个文件。\n\n它也不 import fastapi——异常从这儿抛的是领域异常（`BusinessError`），交给第 9 章的 handler 翻译状态码，因此这段代码能被 CLI 脚本和单元测试直接调用。"
+      }
+    ],
+    "line_notes": [
+      { "line": 3, "kind": "note", "text": "PyJWT（`import jwt`）。注意别装成同名但不同 API 的老包 `jwt`(python-jwt)；装错的表现就是 `encode` 参数签名不一样。" },
+      { "line": "4", "to": 5, "kind": "key", "text": "pwdlib 取代 passlib 的原因：passlib 1.7.x 会去读 bcrypt 的 `__about__` 取版本号，新 bcrypt 移除该属性，于是哈希时报错。pwdlib 专为这个断点而生，接口基本照抄 passlib。" },
+      { "line": 9, "kind": "key", "text": "`PasswordHash((BcryptHasher(),))` 传的是**算法元组**：多放几个（bcrypt + argon2）就能在换算法期间校验老哈希、新密码用新算法。这是平滑迁移哈希算法的标准做法，不要写成一次性全量重置。" },
+      { "line": "12", "to": 16, "kind": "note", "text": "hash 返回自含算法与盐的字符串（`$2b$12$...`），库里只存它。verify 由 pwdlib 解析前缀选算法、重算、恒定时间比对。所以数据库里绝不能出现「我们自己拼的 sha256(salt+pwd)」。" },
+      { "line": 19, "kind": "note", "text": "`datetime.UTC` 是 3.11+ 的别名（3.10 要写 `timezone.utc`）。全部用 aware datetime，别用 `datetime.utcnow()`——它返回 naive 值，和数据库/库比较时容易差 8 小时。" },
+      { "line": 21, "kind": "warn", "text": "JWT 的 `sub` 规范上必须是字符串，Pydantic 侧解析时要清楚它拿到的是 `\"42\"` 不是 `42`（第 5 章 current_user 里那句 `int(payload[\"sub\"])` 就是为此存在）。" },
+      { "line": 22, "kind": "warn", "text": "roles 放进 token 很方便（校验时不用查库），但代价是**改角色不会立刻生效**，得等 token 过期。角色变动频繁或有安全要求时，只放 uid，权限每次查（或放一个 permission/version 号，服务端发现版本落后就拒）。" },
+      { "line": 24, "kind": "key", "text": "`exp` 必须写——它不是可选优化。短期（15–60 分钟）access token 配 refresh token 是标准做法，别用「7 天免登录」的长 token 图省事。" },
+      { "line": 25, "kind": "note", "text": "`jti` 是唯一标识：想吊销就得按 jti 存黑名单（或按 uid + 签发时间判断）。没有它，token 只能等到过期。" },
+      { "line": 27, "kind": "warn", "text": "HS256 意味着所有校验方共享 `secret_key`。有第三方参与验证、或想让「能验证」不等于「能签发」，就换 RS256/ES256 用非对称密钥。密钥本身要 ≥32 字节随机数（第 6 章那个 `min_length=32` 就是为它准备的）。" },
+      { "line": "29", "to": 35, "kind": "key", "text": "decode 必须显式给 `algorithms` 白名单（否则可能接受 `none`）。分类捕获异常：过期与非法都转成 401 语义的领域异常，不要让它冒成 500。注意这里 raise 没带 `from None`，回溯里会多一段「During handling of the above exception」——按 ruff B904 写成 `raise X from exc` 更干净。" }
+    ],
+    "api_cards": [
+      {
+        "name": "jwt.encode / jwt.decode（PyJWT）",
+        "signature": "jwt.encode(payload, key, algorithm=\"HS256\") -> str; jwt.decode(token, key, algorithms=[\"HS256\"], options={...})",
+        "kind": "api",
+        "summary": "签发与校验。decode 会验签并检查 exp/nbf/iat（可配 leeway 容忍时钟偏差）。",
+        "params": [{ "name": "algorithms", "type": "list[str]", "note": "decode 必填，只列你接受的那个" }, { "name": "aud / issuer", "type": "str", "note": "多服务共用密钥时务必校验 audience，否则 A 服务的 token 能用来调 B 服务" }],
+        "returns": "str / dict claims",
+        "gotcha": "PyJWT 不会自动要求 exp：payload 里没写 exp 就永远不过期。给个断言或统一由构造函数产出 payload。"
+      },
+      {
+        "name": "pwdlib PasswordHash",
+        "signature": "PasswordHash((BcryptHasher(),)).hash(pw) / .verify(pw, hashed)",
+        "kind": "api",
+        "summary": "多算法口令哈希。verify 会根据哈希串前缀自动选算法。",
+        "params": [{ "name": "hashers", "type": "元组", "note": "第一个用于生成，其余仍可用于校验旧哈希" }],
+        "returns": "str / bool",
+        "gotcha": "verify 遇到非法/被截断的哈希串可能抛异常而不返回 False（不同版本行为有别），所以传进去前先确保库里值完整；调用点包一层 try 更稳。"
+      }
+    ]
+  },
+
+  "ch08ex02": {
+    "title": "注册与登录端点：防枚举的细节最多",
+    "line_notes": [
+      { "line": "8", "to": 12, "kind": "note", "text": "TokenOut 显式声明 access_token / token_type / expires_in / roles。OAuth2 语义要求 token_type，前端据此拼 Authorization 头；expires_in 让客户端能提前刷新而不是等 401。" },
+      { "line": "16", "to": 18, "kind": "warn", "text": "注释说「不暴露该邮箱已注册」，但 **409 状态码本身就把它暴露了**——枚举者不看文案，只看码。要真防枚举得统一回 200（「若该邮箱存在，我们已发送验证邮件」）+ 异步确认；或先过验证码。文案不改码是没用的。" },
+      { "line": "19", "to": 21, "kind": "key", "text": "只有服务端能算哈希：payload.password 从不入库，存的是 hash_password 的结果。这条链路里没有任何地方能把明文口令写进日志——注意 logging 里别顺手打 payload。" },
+      { "line": 22, "kind": "note", "text": "注册即登录（直接发 token）省一次请求，但会绕过邮箱验证类流程。有验证邮件的产品应改成「发信 + 待确认」状态。" },
+      { "line": 26, "kind": "key", "text": "OAuth2PasswordRequestForm 要的是**表单**（`application/x-www-form-urlencoded`）字段 username/password，不是 JSON。用它换来 /docs 上的 Authorize 按钮；测试里要用 `data={...}`（见第 10 章 headers fixture）。它需要 python-multipart。" },
+      { "line": "29", "to": 33, "kind": "key", "text": "「用户不存在」和「密码错」回同一个 401 与同一句文案，防账号枚举。两个隐藏细节：① 短路写法 `user is None or not verify(...)` 让用户不存在时不跑哈希，响应快几十毫秒，这是**时序侧信道**，严格做法是对固定假哈希也验一次；② 401 配 `WWW-Authenticate: Bearer` 才符合 HTTP 语义。" },
+      { "line": "34", "to": 35, "kind": "note", "text": "账号被禁用是「认证成功但不允许」→ 403，和 401 区分开是对的。前端据此不跳登录页而是提示联系管理员。" }
+    ],
+    "concepts": [
+      {
+        "kind": "flow",
+        "title": "登录一次请求的失败分支地图",
+        "body": "缺头/没带凭证 → 401（+WWW-Authenticate）；token 过期或非法 → 401；密码错或用户不存在 → 401（同一文案）；用户存在且密码对但被禁用 → 403；表单格式错（用 JSON 调 login）→ 422；被限流 → 429 + Retry-After。\n\n把这张表画出来给前端，比口头解释「有时候 401 有时候 403」有用得多，也能直接变成测试用例（第 10 章那张四结局表就是它的投影）。"
+      }
+    ],
+    "api_cards": [
+      {
+        "name": "OAuth2PasswordRequestForm",
+        "signature": "form: Annotated[OAuth2PasswordRequestForm, Depends()]",
+        "kind": "api",
+        "summary": "OAuth2 密码模式的表单依赖：给你 username、password、scopes、grant_type。",
+        "params": [{ "name": "username", "type": "str", "note": "字段名固定；邮箱登录是把邮箱放进 username" }],
+        "returns": "form 数据对象",
+        "gotcha": "它只解析表单，不校验任何凭据（名字容易误导）。真正的验证还是你自己写。要 JSON 登录接口就别用它，自己定义模型。"
+      }
+    ]
+  },
+
+  "ch08ex03": {
+    "title": "对象级权限：越权要「看不见」而不是「不许」",
+    "line_notes": [
+      { "line": 7, "to": 9, "kind": "note", "text": "不存在 → NotFound（404）。这一步任何登录用户都可能触发，不泄露任何信息。更省一次的写法是 `task_repo.get_for_owner(db, tid, user.id)`（第 7 章仓储层）：把归属条件写进 SQL，查不到就是「不存在或不属于你」，下面两个分支天然合并成一个。" },
+      { "line": "10", "to": 12, "kind": "key", "text": "不是自己的任务且不是 admin → 也抛 NotFound，两处一模一样的响应。目的是让「状态码」无法用来探测资源是否存在：若这里回 403，攻击者就能拿一串 id 试出哪些是有效任务（以及它们属于别人）。" },
+      { "line": 11, "kind": "warn", "text": "但 404 也有代价：合法用户误粘链接时得到「找不到」，支持成本上升，且响应时间/错误码仍可被统计侧信道利用。取舍标准：**id 是否可猜**。自增整型（可枚举）→ 404 更稳；UUID/雪花 id（猜不到）→ 403 更利于排障。选一种写进团队约定，别两种混在一个项目里。" },
+      { "line": 13, "kind": "note", "text": "return task 由 response_model=TaskOut 裁剪。注意这是**行级**权限：同一行里某些字段（比如内部备注）还要按角色隐藏，那是字段级，得靠不同出参模型，不是这里能解决的。" }
+    ],
+    "concepts": [
+      {
+        "kind": "compare",
+        "title": "四道门分别在哪里：路由 / 端点 / 仓储 / 模型",
+        "body": "- **路由级**（require_role）：能不能进这个门。粗、快、可批量挂。\n- **端点级**（本例）：拿到资源后比对 owner_id。清楚，但容易忘记——多一个端点就多一次「忘了判」。\n- **仓储级**（`get_for_owner`）：把归属写进查询条件，**忘不掉**，这是最稳的一层。列表接口同理：`_visible()` + `owner_id` 恒定条件。\n- **模型级**（出参模型分角色）：决定字段可见性。\n\n推荐默认：能推到仓储层的判断就推到仓储层（安全默认），端点里只留业务分支。反过来，把所有权判断只写在端点里、仓储提供 `get_all()`，时间一久一定有人调错方法。"
+      }
+    ]
+  },
+
+  "ch08ex04": {
+    "title": "CORS：错误写法与完整写法对照",
+    "line_notes": [
+      { "line": "1", "to": 2, "kind": "warn", "text": "`allow_origins=[\"*\"]` 和 `allow_credentials=True` 是互斥的：规范要求带凭据时不能回通配符，浏览器会直接拒绝该响应。表现是「Postman 能调、网页带 cookie 就报 CORS 错」，很容易误诊为后端问题。" },
+      { "line": 6, "kind": "key", "text": "明确列来源。本地 Vite(5173)/Next(3000) 与线上域名各一条；预览环境用 allow_origin_regex 匹配子域，而不是退回 \"*\"。" },
+      { "line": "8", "to": 9, "kind": "note", "text": "`allow_methods=[\"*\"]` / `allow_headers=[\"*\"]` 开发期方便，生产建议列举。要清楚一个细节：带凭据的预检里浏览器不把 `*` 当通配处理，Starlette 的做法是**把请求头原样回显**，所以它通常能工作，只是把「允许哪些方法/头」变成了不可审计的开放集。" },
+      { "line": 10, "kind": "key", "text": "`expose_headers` 常被漏：不写它，浏览器允许请求成功，但 JS **读不到** X-Trace-Id 这类自定义响应头（只能读到 6 个 CORS-safelisted 的）。排查「响应头明明有但 fetch 拿不到」就在这里。" },
+      { "line": 11, "kind": "note", "text": "max_age 让预检结果在浏览器缓存 600 秒，省掉一半 OPTIONS 请求。调接口权限字段后记得这个缓存会造成几分钟的「时好时坏」。" }
+    ],
+    "concepts": [
+      {
+        "kind": "base",
+        "title": "CORS 三条铁律",
+        "body": "1. **它是浏览器规则，不是安全机制。**服务端接口必须自己鉴权；把 CORS 关掉挡不住任何 curl。\n2. **带凭据就不要用通配。**`allow_credentials=True` 时 origins 必须精确；同理 `Access-Control-Allow-Headers` 也别指望 `*` 在所有浏览器下等价生效。\n3. **预检是独立一次 OPTIONS 请求。**它会带上 Origin / Access-Request-Method / Headers，**不会带 cookie**（除非 SameSite 允许）——所以在中间件里按 cookie 做判断会看到「预检没有身份」的假象。另外反向代理、CDN、网关上的 CORS 头与应用冲突（两边都加了一次）时浏览器会报错，只在一处配。"
+      }
+    ]
+  },
+
+  "ch08ex05": {
+    "title": "登录限流依赖：固定窗口 + 身份维度",
+    "line_notes": [
+      { "line": 6, "kind": "note", "text": "作为依赖挂在 login 路由上（而不是中间件），这样它能直接拿到 request 与注入的 redis，也只作用于真正需要它的端点。" },
+      { "line": 8, "kind": "warn", "text": "`request.client.host` 在反向代理/网关后面拿到的是**代理的 IP**，所有用户会被合并计数。生产要么信任并解析 X-Forwarded-For（配合 uvicorn `--proxy-headers --forwarded-allow-ips`），要么自己在可信代理列表下取第一个非可信 IP。这一步弄错，限流就等于全局熔断。" },
+      { "line": 9, "kind": "note", "text": "在依赖里读 form 是可行的（Starlette 会把解析结果缓存在 request 上，端点随后仍能取到），但注意 multipart/大 body 场景不要这么写。更通用的是只按 IP 限流，把账号维度交给验证码。" },
+      { "line": 10, "kind": "key", "text": "账号做 sha256 截断：避免把用户邮箱明文写进 redis key（键会出现在监控、slowlog、dump 里），也避免超长/特殊字符键。加盐或至少加前缀 `rl:login:` 方便批量清理。" },
+      { "line": "11", "to": 13, "kind": "warn", "text": "`INCR` 之后再 `EXPIRE` 不是原子的：进程在两步之间崩掉，会留下**永不过期的计数键**，该账号就此被永久封禁。正确做法是 Lua 脚本单命令完成，或用 `SET key 1 EX 300 NX` + 后续 INCR。" },
+      { "line": "14", "to": 16, "kind": "key", "text": "429 太常见被忽略，`Retry-After` 才是让客户端行为正确的关键（给出秒数，前端可以做倒计时）。固定窗口有边界问题：在窗口切换瞬间可放过 2 倍流量，真要严格用滑动窗口或令牌桶。" }
+    ],
+    "concepts": [
+      {
+        "kind": "compare",
+        "title": "限流算法与放置层次",
+        "body": "- **固定窗口**（本例）：一条 INCR + TTL，实现最省事；边界会放过双份流量。\n- **滑动窗口/日志**：更准，成本更高（ZSET 记时间戳）。\n- **令牌桶**：允许突发但有均值上限，最接近「用户体验合理」的模型。\n\n层次：网关/云 WAF（挡住大流量、按 IP）→ 应用依赖（按用户/账号/接口，能拿到身份）→ 数据库/下游配额（保护被依赖方）。\n\n**多副本必须用集中存储计数**（Redis），进程内 dict/`lru_cache` 做限流在 4 worker × 3 副本下等于把限额放大了 12 倍。本站沙箱的资源上限（CPU/内存/墙钟，见 app/sandbox.py）就是这一层的简化版。"
+      }
+    ]
+  },
+
+  "ch09ex01": {
+    "title": "请求处理顺序图：从中间件到后台任务",
+    "line_notes": [
+      { "line": "2", "kind": "key", "text": "后 add 的先执行（洋葱模型的外层包内层）。CORS 要放最外层：预检 OPTIONS 必须在任何鉴权/日志之前被短路处理，否则 401 的响应不带 CORS 头，浏览器只会报 CORS 错把真相盖住。" },
+      { "line": "3", "kind": "warn", "text": "路由自上而下匹配，先注册者胜。所以 `/tasks/export` 必须写在 `/tasks/{tid}` 前面，否则 tid 会收到 \"export\" 然后因为 int 解析失败回 422——排查方向完全错。" },
+      { "line": "4", "kind": "note", "text": "依赖链按拓扑顺序执行，同一请求内相同依赖默认只算一次（第 5 章 use_cache）。" },
+      { "line": "5", "kind": "warn", "text": "「校验失败直接 422 不进函数」是对的，但**校验不是一次性发生的**：每个依赖的参数在解析它自己时就校验。于是可能先跑完带副作用的依赖（开 session、查权限），再因为端点某个字段非法而 422。有副作用的依赖要幂等，或者排在后面。" },
+      { "line": "7", "kind": "key", "text": "response_model 的裁剪与序列化在这里，比依赖收尾更早——所以下一条能解释「异常发生在 commit 时但客户端已经看到响应」。" },
+      { "line": "8", "kind": "note", "text": "依赖 `yield` 之后的部分（提交事务、关连接）在响应已生成之后执行。`get_db` 的自动 commit 因此不能保证「200 == 已落库」。" },
+      { "line": "9", "kind": "note", "text": "中间件的响应阶段适合加头与计时（本站 X-Request-Id / X-Process-Time-ms 就是这么打的），但别在异常路径上忘加 CORS 头——这也是 CORS 该放最外层的第二个理由。" },
+      { "line": 10, "kind": "key", "text": "BackgroundTasks 在响应发完之后跑：它不能影响状态码，异常只进日志，且请求级资源（session）可能已经关掉——所以要新开 session（第 5 个例子）。" }
+    ]
+  },
+
+  "ch09ex02": {
+    "title": "访问日志中间件：rid + 耗时 + 状态码",
+    "line_notes": [
+      { "line": 5, "kind": "note", "text": "独立的 logger 名字（app.access），方便单独配级别或单独路由到某个 handler，也能把访问日志和业务日志分流。" },
+      { "line": 6, "kind": "key", "text": "ContextVar 是异步下传「当前请求上下文」的正确工具：每个任务有自己的副本，`threading.local` 在一个线程跑多个协程时会串味。default=\"-\" 保证脱离请求上下文打日志（启动、后台线程）不会 KeyError。" },
+      { "line": 10, "kind": "key", "text": "优先复用上游的 X-Trace-Id（网关已生成时），没有才自己生成。截 16 位是「够用于检索 + 不至于让日志变肥」的折中。全链路追踪上线后这一步会换成 traceparent。" },
+      { "line": "11", "to": 12, "kind": "note", "text": "token = set(...) 一定要配 reset(token)。set 而不 reset，同一上下文后续读到的是脏 rid——表现为「日志里两个请求共用一个 id」，非常难查。" },
+      { "line": "13", "to": 16, "kind": "note", "text": "status 先预置 500，成功路径再覆盖。这样即使下游抛异常，日志里的状态码也与实际响应一致（否则默认 200 会让「500 但日志显示 200」的经典误判再次发生）。" },
+      { "line": "17", "to": 19, "kind": "key", "text": "这里 catch 只是为了 `log.exception` 带堆栈，随后 **raise 原样抛出**。吞掉异常会让全局 handler 收不到，客户端拿到一个空洞的 500，日志与响应还不一致。" },
+      { "line": "20", "to": 22, "kind": "note", "text": "finally 保证计时和 reset 一定执行；cost 在异常路径上也有效。" },
+      { "line": "23", "kind": "warn", "text": "写响应头这行在 try 之后：异常时不执行（本来也没有 response）。要异常响应也带 X-Trace-Id，得在兜底 handler 里补，或者改写成纯 ASGI 中间件在 send 时统一注头。" },
+      { "line": "25", "to": 26, "kind": "key", "text": "extra 字典的键会挂在 LogRecord 上，被 JsonFormatter 白名单挑出来（第 3 个例子）。注意别用 LogRecord 已有属性名（msg/args/name/module/levelname…）当键，会抛 `KeyError: 'Attempt to overwrite ...'`。" }
+    ],
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "中间件该做什么，不该做什么",
+        "body": "适合：跨所有请求的**技术性**事情——追踪 id、计时、访问日志、安全响应头（HSTS/X-Frame-Options）、压缩、维护页开关。\n\n不适合：鉴权与授权（应该用依赖：有 OpenAPI、能 override、能拿到 response_model 与用户对象）、业务校验、往响应体里塞统一结构（交给异常 handler）。原因不是性能，是**可测试性与可组合性**：依赖能被单个端点覆盖，中间件会影响所有请求，测试里几乎没法替换。"
+      }
+    ],
+    "api_cards": [
+      {
+        "name": "ContextVar",
+        "signature": "rid: ContextVar[str] = ContextVar(\"rid\", default=\"-\"); token = rid.set(v); ...; rid.reset(token)",
+        "kind": "api",
+        "summary": "协程安全的上下文变量；被 await 链天然继承，日志 Filter 可以从中取 rid。",
+        "params": [{ "name": "default", "type": "Any", "note": "给个占位值，省去每个读取点处理 KeyError" }],
+        "returns": "当前上下文的值 / Token（用于 reset）",
+        "gotcha": "它不会跨线程传播：把日志写进线程池（`run_in_threadpool`）时，工作线程里读到的是默认值。要在任务入口显式 set。"
+      }
+    ]
+  },
+
+  "ch09ex03": {
+    "title": "JSON 日志：字段白名单 + stdout",
+    "line_notes": [
+      { "line": "4", "to": 16, "kind": "key", "text": "Formatter 产出一行一个 JSON。字段固定（ts/level/logger/rid/msg）+ 上下文白名单（path/cost_ms/status/uid）。白名单是刻意的：不加它日志会随 record 属性膨胀，加它才能被索引系统稳定解析。" },
+      { "line": 7, "kind": "note", "text": "%z 会带上 UTC 的 +0000。日志时间建议保持 UTC，展示层再转本地时区；混着写会做不出正确的耗时统计。" },
+      { "line": 10, "kind": "note", "text": "rid 直接读 ContextVar——这就是「日志自动带请求 id」的实现，靠的是不用在每条 log.info 里手动传参。" },
+      { "line": 16, "kind": "key", "text": "ensure_ascii=False 让中文原样输出（否则 `\\u4e2d\\u6587` 没法看）；`default=str` 兜住 Decimal/datetime/UUID 这类不可直接序列化的对象，免得日志本身把请求打崩——这是日志最常见的次生故障。" },
+      { "line": 19, "kind": "key", "text": "写 stdout：容器/平台负责采集与轮转。自己在容器里开文件写日志会撑爆可写层，而且多数平台看不到。" },
+      { "line": 22, "kind": "warn", "text": "`root.handlers = [h]` 是**替换**，不是 append。append 的话日志会被打两遍（uvicorn 已经装了自己的 handler）。同理 `basicConfig` 在 root 已有 handler 时什么都不做——这个静默失败坑过很多人。" },
+      { "line": 23, "kind": "note", "text": "级别由配置驱动。上线后需要 DEBUG 时改配置重启，而不是把 DEBUG 写进代码。另外把 uvicorn.access 关掉或降级（`logging.getLogger(\"uvicorn.access\").disabled = True`），否则访问日志双份。" }
+    ],
+    "concepts": [
+      {
+        "kind": "base",
+        "title": "结构化日志的最小必要字段",
+        "body": "时间、级别、logger 名、消息、**rid**。再加三个业务最有用的：path（或 route 模板）、status、cost_ms。\n\n两条纪律：**禁止字段**要写进 code review 清单——password、token、authorization 头、完整身份证号、信用卡号（要么不打，要么打掩码）；**基数控制**——别把整个请求体塞进一条日志，也别给「用户自由输入文本」做日志维度（那会打爆索引存储）。\n\n再上一层是 trace id 进响应头（第 2 个例子的 X-Trace-Id）：用户报障给一个 id，你查一整个请求链，效率差十倍。"
+      }
+    ]
+  },
+
+  "ch09ex04": {
+    "title": "四个 handler：把异常统一成一种形状",
+    "line_notes": [
+      { "line": "12", "to": 16, "kind": "key", "text": "领域异常 → 用它自带的 status_code + code/message + trace_id。业务层因此完全不知道 HTTP 存在，而客户端永远拿到同一个形状（`ok:false` + code）。" },
+      { "line": "18", "to": 27, "kind": "key", "text": "RequestValidationError 是内置 422 的来源。`e[\"loc\"]` 形如 `(\"body\", \"items\", 0, \"title\")`，`loc[1:]` 去掉来源前缀再拼成 `items.0.title`，正好是前端表单能定位到具体输入的键。`or \"body\"` 兜住整个请求体本身非法的情况（loc 只有 (\"body\",)）。" },
+      { "line": "29", "to": 32, "kind": "warn", "text": "IntegrityError → 409 很实用（唯一约束竞态兜底），但**异步 session 里事务此时已失败**：handler 只负责回响应，session 需要 rollback/关闭（本站 get_db 的 except 分支会 rollback）。别在这条请求里继续跑后续查询，那只会得到「当前事务已终止」。" },
+      { "line": 34, "to": 39, "kind": "key", "text": "兜底 handler 的两条职责：对外只说 server error（**绝不外泄堆栈、SQL、文件路径**），对内 `logger.exception` 留全量回溯 + trace_id。少了后者会出现「用户说报错但日志什么都没有」。另一面是：注册 `Exception` 后 /docs 里的错误示例不会自动更新——统一响应体得靠第 4 章的 responses 参数写进文档，否则前端只能读源码才知道形状。" }
+    ],
+    "concepts": [
+      {
+        "kind": "compare",
+        "title": "raise HTTPException 还是 raise 领域异常",
+        "body": "`HTTPException` 属于「表示层」工具：在端点/依赖里表达「这次请求该回什么码」很直接（401、404、429），而且 FastAPI 原生支持。领域异常属于「业务层」：规则被拒绝时不该 import 任何 HTTP 概念。\n\n本站取的分法是：**协议层的拒绝**（没登录、没权限、参数不合法、限流）用 HTTPException，写在这里的 handler 只处理领域异常和框架异常；**业务规则的拒绝**（配额、状态机、重名）用 BusinessError + 全局 handler。判据是「换个传输方式（gRPC/CLI）这句话还成立吗」——成立就是领域异常。"
+      }
+    ],
+    "api_cards": [
+      {
+        "name": "app.exception_handler",
+        "signature": "@app.exception_handler(BusinessError)\\nasync def h(request: Request, exc): return JSONResponse(...)",
+        "kind": "api",
+        "summary": "按异常类型注册翻译器。子类型不会自动匹配父类——注册 BusinessError 拦不住直接抛出的 Exception 分支，需要单独注册或用中间件。",
+        "params": [{ "name": "exc 类型", "type": "Type[BaseException]", "note": "HTTPException 与 RequestValidationError 已被 FastAPI 预注册，覆盖它们即接管该类错误" }],
+        "returns": "Response",
+        "gotcha": "在 handler 里 raise 新异常没人处理，会变 500；也别在 handler 里访问 request.state 上尚未赋值的字段（它可能在内层之前就被调用）。"
+      }
+    ]
+  },
+
+  "ch09ex05": {
+    "title": "BackgroundTasks：响应先走，杂事后做",
+    "line_notes": [
+      { "line": "6", "to": 9, "kind": "key", "text": "后台任务的函数要**自己开 session**（`async with factory() as db`）。请求那个 session 在响应发完后已被依赖收尾关闭/归还，继续用它是未定义行为。第 5 章 get_db 的时序解释正好在这里兑现。" },
+      { "line": "14", "kind": "note", "text": "BackgroundTasks 是特殊类型注解，FastAPI 看到它就注入，不需要 Depends。位置随便放，但要和别的参数一样写进签名。" },
+      { "line": "19", "kind": "key", "text": "先 commit 再 add_task，否则后台任务在另一个 session 里读不到刚写的行（还没提交）。反过来，如果希望「发信失败也不影响已创建的任务」，那就必须已经提交——这个先后顺序是这段代码最值钱的一行。" },
+      { "line": "20", "kind": "note", "text": "add_task 传的是函数和参数（`bg.add_task(fn, *args, **kwargs)`），不是调用结果。写成 `bg.add_task(send_email(...))` 会立刻执行，把协程对象交给它，等于没有后台化。" },
+      { "line": 21, "kind": "warn", "text": "审计这种「绝不能丢」的写操作，BackgroundTasks 只是及格线：进程崩溃/部署重启会丢掉队列里未执行的任务，且无重试、无去重、无观测。生产级做法是事务性 outbox（在同一个事务里写 audit 表，由 worker 轮询发送）或真正的消息队列。" }
+    ],
+    "concepts": [
+      {
+        "kind": "compare",
+        "title": "后台任务、任务队列、outbox 怎么选",
+        "body": "- **BackgroundTasks**：同进程、响应后执行。适合「丢了不痛」的事——发通知、清缓存、写审计副本日志。优点零依赖；缺点是无持久化、无重试、会占住 worker 时间（长任务把并发额度吃光），也不适合 CPU 密集。\n- **任务队列（Celery / ARQ / Dramatiq / RQ）**：跨进程、有重试与超时、有可观测（队列长度、失败率）。适合发信、跑报表、调第三方接口。代价是要维护 broker 与 worker 部署。\n- **事务性 outbox**：把「要发出去的消息」作为一行写进同一个本地事务，再由轮询/CDC 投递。解决「数据库提交了但消息没发出去」的双写不一致——涉及钱和状态同步时这是唯一干净的答案。\n\n判据一句话：**这件事没做成，用户会受影响吗？会不会重复做？**会 → 队列/outbox；不会 → BackgroundTasks。"
+      }
+    ]
+  },
+
+  "ch09ex06": {
+    "title": "SSE：把长任务进度推给浏览器",
+    "line_notes": [
+      { "line": "7", "to": 10, "kind": "key", "text": "async 生成器一条条 yield。SSE 的帧格式很朴素：`event: 名字\\n` + `data: 内容\\n` + **一个空行结束一条**。少那个空行，浏览器会一直等，看起来像「连上了但没数据」——这是 SSE 的头号排障点。" },
+      { "line": 9, "kind": "note", "text": "data 里放 JSON 字符串并 ensure_ascii=False（中文进度消息保持可读）。多行文本要拆成多条 `data:` 行，否则会被当成一个字段截断。" },
+      { "line": 10, "kind": "note", "text": "结尾显式发 `event: done`，前端才知道可以关流并刷新最终状态，而不是靠超时猜。" },
+      { "line": 11, "kind": "warn", "text": "db 依赖在流结束前不能被关闭——生成器里用 session 会把依赖生命周期拉长到整个流式期间，占用连接。要么把需要的数据先取出来，要么在生成器内自管 session（见上一个例子）。" },
+      { "line": 12, "kind": "key", "text": "`Cache-Control: no-cache` 防中间缓存；`X-Accel-Buffering: no` 关掉 Nginx 的响应缓冲，否则它会攒够一块才吐，表现为「进度全部一次性到达」。这是 SSE 在网关后被坑的第二常见原因（第一是 CORS 与鉴权头）。" }
+    ],
+    "concepts": [
+      {
+        "kind": "flow",
+        "title": "SSE 的三件事要想清楚：鉴权、断线、并发",
+        "body": "- **鉴权**：浏览器原生 `EventSource` 不能自定义请求头，Bearer token 方案要么走 `?token=`（会进访问日志，短时效一次性 token 才可接受），要么用 fetch + ReadableStream 自己解析 SSE（能带头，本站推荐这条）。\n- **断线**：SSE 会自动重连，配合 `id:` 行 + 服务端记住 Last-Event-ID 才能续传；还要发心跳（`: ping\\n\\n`）防止空闲连接被代理掐断。\n- **并发**：每条流挂着一个 worker 与一条连接。uvicorn worker 数有限时，几十个长连接就能占满；网关空闲超时也要一起调大。\n\n需要双向（客户端中途发指令）就换 WebSocket；只要「服务器单向推」，SSE 更省事：纯 HTTP、自动重连、文本协议好读，穿代理也比 WebSocket 顺利。"
+      }
+    ]
+  },
+
+  "ch10ex01": {
+    "title": "测试装置：内存库 + 依赖覆盖 + 进程内 ASGI 客户端",
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "这套 fixture 的三根支柱",
+        "body": "1. **内存 SQLite + StaticPool**：不依赖外部数据库，测试可以并行、可以每次全新建表。StaticPool 是必需的——`sqlite+aiosqlite://`（内存库）对每个新连接都是一个新库，不加它建好的表下一个连接就看不到了。\n2. **`app.dependency_overrides[get_db]`**：把真实 session 换进应用，测试里塞的 fixture session 和被测代码用的是同一个，因此可以预置数据、也可以直接查库断言状态。第 5 章依赖注入在这里兑现红利。\n3. **`httpx.ASGITransport`**：进程内直连 ASGI app，不占端口、不起服务。`client.post(...)` 会真走中间件、路由、依赖、校验、序列化全套——这就是「测契约」能成立的原因。\n\n注意 ASGITransport **不会执行 lifespan**：要跑启动逻辑得再加 `asgi_lifespan.LifespanManager`，或在 fixture 里手工准备它建的东西（本站的 asgi 模式正是用了 LifespanManager，可对照 app/sandbox.py）。"
+      }
+    ],
+    "line_notes": [
+      { "line": 12, "kind": "note", "text": "文件级 pytestmark 让本文件所有异步测试都被 asyncio 插件接管。新版 pytest-asyncio 要显式配 `asyncio_mode` 或按 fixture 标记，忘配的典型症状是「fixture 返回了协程对象」。" },
+      { "line": "16", "to": 18, "kind": "key", "text": "内存库 + StaticPool（见上方概念）。check_same_thread=False 是 aiosqlite 在异步下跨线程使用的必需声明，与 FastAPI 里 session 会被丢进线程池的行为有关。" },
+      { "line": "19", "to": 20, "kind": "warn", "text": "测试用 create_all 图快，但代价是**它绕过迁移**：模型和 alembic 脚本不同步时测试全绿、线上炸。补一条 CI 检查：空库上 `alembic upgrade head` 后比对 `alembic check` / metadata 是否一致。" },
+      { "line": 21, "kind": "note", "text": "expire_on_commit=False 与生产 session 保持一致，否则测试测的是另一个行为。" },
+      { "line": 26, "kind": "key", "text": "client 依赖 db：一个测试里 HTTP 与直查库共用同一 session，这是「先 POST 再断言数据库状态」能写出来的前提。" },
+      { "line": "28", "to": 29, "kind": "note", "text": "每个测试新建 app（create_app 工厂），测试之间不共享路由与 override；最后 `clear()` 防串味。" },
+      { "line": "30", "to": 31, "kind": "key", "text": "ASGITransport + base_url 让代码看起来像在打真实 HTTP 服务，但进程内完成。它和「起 uvicorn 再打真端口」的差别是：不能测 uvicorn 层的东西（代理头、worker、超时），也别指望跑 lifespan。" },
+      { "line": "37", "to": 41, "kind": "warn", "text": "headers fixture 用 `data={...}` 调 login——因为 OAuth2PasswordRequestForm 吃的是表单不是 JSON（写成 json= 会得到 422，非常常见）。另外它注册即用固定邮箱，测试之间共用同一用户，写「越权」用例时要另造一个用户。" }
+    ]
+  },
+
+  "ch10ex02": {
+    "title": "一个端点四种结局：成功 / 未登录 / 校验 / 越权",
+    "line_notes": [
+      { "line": "4", "to": 5, "kind": "note", "text": "断言状态码和**响应内容契约**。只断言 201 不够——字段名写错、多返回一列，都可能悄悄漏过。" },
+      { "line": 6, "kind": "key", "text": "`\"password\" not in r.text` 这类「负向断言」是防凭据泄漏最便宜的手段。更进一步可以断言响应键集合等于期望集合（`set(body) == {...}`），多一个字段就红。" },
+      { "line": "8", "to": 10, "kind": "key", "text": "不带 headers 调受保护接口 → 401。每条受保护路由都该有这一行：漏挂依赖是能被测出来的，而且这类缺陷的后果最重。" },
+      { "line": "12", "to": 17, "kind": "key", "text": "空 title → 422，并且断言的是第 9 章统一后的错误体（code + fields[\"title\"]）。这条测试同时保护了「前端依赖的错误形状」，改 handler 时不会悄悄破坏客户端。" },
+      { "line": "19", "to": 21, "kind": "key", "text": "别人的任务 DELETE → 404 而不是 403。断言 404 就是在断言「不泄露存在性」这个安全决定：哪天有人「顺手改成 403 方便调试」，测试会拦住。" }
+    ],
+    "concepts": [
+      {
+        "kind": "compare",
+        "title": "端点测试与 service 测试的分工",
+        "body": "端点测试（本例）覆盖**契约**：状态码、鉴权、校验错误形状、字段可见性、越权表现。它的成本高（要构造 client、造数据），所以数量要克制，每条路由几条足够。\n\nservice 测试覆盖**规则**：配额、状态流转、边界数值、并发假设。它不需要 HTTP，直接 `TaskService(FakeRepo())` 调用，快且能测难构造的分支（比如「刚好第 200 个活动任务」）。\n\n仓储测试覆盖**查询**：软删除过滤、分页 total 与 order_by 的组合、`get_for_owner` 真的带 owner 条件。用内存 SQLite 足够，不需要 mock ORM。\n\n三者别互相替代：只测 service 会让「忘了挂鉴权」溜过去；只测端点会让状态机的 20 个分支变成 20 个 HTTP 请求。"
+      }
+    ]
+  },
+
+  "ch10ex03": {
+    "title": "Dockerfile：多阶段 + 非 root + 层缓存",
+    "line_notes": [
+      { "line": "2", "to": 7, "kind": "key", "text": "builder 层只负责把依赖装进 `/install` 前缀目录。先 COPY `pyproject.toml`/README（很少变），再 COPY app，最后 install——依赖层的缓存命中取决于前面的文件不变。要更细可以把依赖解析单独一层（先 COPY lock 文件、装依赖、再 COPY 源码），代码改动就不会重装依赖。" },
+      { "line": "7", "kind": "note", "text": "这里连 app 一起 COPY 是因为项目自身作为包被安装（需要包元数据）。纯应用镜像可以把这一步只留依赖，运行层再单独 COPY 源码，改代码时能复用依赖层。" },
+      { "line": 11, "kind": "key", "text": "PYTHONUNBUFFERED=1：不加它 Python 会缓冲 stdout，容器日志出现「有输出但延迟几十秒」或崩溃信息丢失——排障时会误判成没启动。PYTHONDONTWRITEBYTECODE 省一层垃圾。" },
+      { "line": "12", "to": 14, "kind": "key", "text": "创建固定 uid 的非 root 用户（K8s 的 runAsNonRoot / 安全策略会要求）；curl 只为 HEALTHCHECK 存在，`--no-install-recommends` + 同一层内 `rm -rf /var/lib/apt/lists/*` 让 apt 缓存不落进镜像层（跨层删除不减体积，这是镜像瘦身最常见的误解）。" },
+      { "line": 16, "kind": "note", "text": "--from=builder 把 /install 拷进 /usr/local，运行层因此不需要 pip 与编译工具链，体积和攻击面都小。" },
+      { "line": 17, "kind": "warn", "text": "`USER app` 之前的 COPY 若不带 `--chown`，文件属主还是 root，进程只读能过、写入会失败（SQLite/上传临时目录/缓存都会撞）。需要写的目录要么 --chown，要么挂 emptyDir。" },
+      { "line": "19", "to": 21, "kind": "note", "text": "EXPOSE 只是元信息（给文档和 docker run -P 用），真正决定监听的是 CMD 里的 --host/--port。HEALTHCHECK 打 /healthz（存活），start-period 给启动暖机留时间，否则冷启动就被判死。" },
+      { "line": "22", "to": 23, "kind": "warn", "text": "迁移不进启动命令（多副本并发迁移会互相踩）——和第 7 章那条一致。另外 `--host 0.0.0.0` 在容器里是必须的（NAT 之外要能连进来），但别把本站这类会执行代码的服务这样发布到公网。" }
+    ],
+    "concepts": [
+      {
+        "kind": "base",
+        "title": "镜像分层：缓存命中就是构建时间",
+        "body": "Docker 按指令顺序算层缓存，任何一层变了，它**和之后所有层**都失效。所以指令顺序应该是「变得越慢越靠前」：\n\n1. 系统依赖（apt）\n2. 语言运行时与依赖清单（pyproject/uv.lock/requirements.txt）\n3. **装依赖**\n4. 源码\n5. 构建静态资源/打包\n\n本站用 uv 的话，典型写法是第 0 步 `COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv`，然后 `uv sync --frozen --no-dev`：`--frozen` 保证按锁文件装（不重新解析），`--no-dev` 不带测试依赖。改一行代码时只失效第 4 步，构建从几分钟变成几秒。\n\n另外两条：绝不要把 `.env` COPY 进镜像（密钥会永久留在层里，`docker history` 就能看到）——运行时注入；用多阶段把编译工具链留在 builder；`.dockerignore` 至少排除 `.venv`、`__pycache__`、`.git`、`data/`（否则本地数据库文件会被打进镜像）。"
+      }
+    ]
+  },
+
+  "ch10ex04": {
+    "title": "生产启动：uvicorn 多进程 / gunicorn / fastapi run",
+    "line_notes": [
+      { "line": 1, "kind": "key", "text": "`--workers 4` 是 4 个独立进程，各有事件循环和**各自一套连接池**。数据库连接数 = 副本数 × worker × (pool_size + max_overflow)，这一条要算，不算是「上线后 too many connections」的直接原因。workers 一般取 CPU 核数附近，超过核数只是加重上下文切换与连接消耗。" },
+      { "line": 2, "kind": "note", "text": "gunicorn 作进程管理器 + UvicornWorker：管理端功能更成熟（graceful timeout、preload、statsd、信号处理），适合已有 gunicorn 运维体系的团队。纯 uvicorn 少一个依赖，多数场景足够。" },
+      { "line": 3, "kind": "warn", "text": "上面两条命令里的 --timeout 60 / --graceful-timeout 30 要与你自己的执行上限对齐：本站把沙箱墙钟设为 8 秒（app/config.py 的 exec_timeout），若代理侧 5 秒就超时，用户看到的永远是 502 而不是我们的「墙钟超时」提示。超时链必须**从内到外递增**：代码超时 < 应用超时 < 网关超时。同理 `fastapi run` 是官方封装，默认多 worker + 0.0.0.0——方便，但要清楚它隐含了这些默认值，排查「本机怎么连不上 127.0.0.1」时先想起它。" }
+    ],
+    "concepts": [
+      {
+        "kind": "compare",
+        "title": "并发模型：多进程、异步、线程池三者怎么配",
+        "body": "worker 数解决 **CPU 并行**（Python 多进程才能真正用满多核），异步解决 **IO 等待重叠**（单进程内处理上千并发连接），线程池兜住 **无法异步化的同步调用**（默认上限 40）。\n\n所以 `--workers 8` + `async def` 里全是同步 requests，就是 8 个进程各卡各的，比 `--workers 1` 好不了多少；反过来 `--workers 1` + 全异步 + 合理的池，单机就能撑很高的并发连接。\n\n两条实践：① 内存态东西（进程内缓存、限流计数、in-memory 任务表）在多 worker 下**每个进程一份**，所以限流要 Redis、缓存要接受不一致；② 有状态长任务（SSE、WebSocket）会让「同一用户的请求落到不同 worker」变复杂，要么用共享总线广播，要么会话粘连。"
+      }
+    ]
+  },
+
+  "ch10ex05": {
+    "title": "压测：locust 写场景，wrk 测上限",
+    "line_notes": [
+      { "line": 1, "kind": "note", "text": "locust 用 Python 写用户行为（登录 → 建任务 → 分页查询），`-u 200` 并发用户、`-r 20` 每秒新增、`-t 60s` 时长、`--headless` 不开 Web UI 以便进 CI。适合「带业务形状的负载」。" },
+      { "line": 2, "kind": "warn", "text": "wrk 是单接口吞吐/延迟的快测（`-t8` 线程、`-c200` 连接、`-d30s`），它不懂鉴权组合，所以用来找**单点上限**而不是模拟真实流量。两条通用注意：① 压 localhost 数字虚高（没有网络 RTT、没有代理、DB 同机），要压预发并等比换算，同时确认先满的不是压测机自己；② 看 **p95/p99 与错误率**，不看平均值——p99 从 80ms 变 2s 时平均值可能毫无变化，而体验已经崩了。" }
+    ],
+    "concepts": [
+      {
+        "kind": "base",
+        "title": "压测前先测这四件事",
+        "body": "1. **正确性基线**：第 10 章那套测试先绿。带着 bug 压测，测的是 bug 的性能。\n2. **单请求画像**：一次请求发几条 SQL、有无 N+1（第 7 章那个例子）、有没有外部调用。心里没数就只会调 worker 数。\n3. **瓶颈定位**：CPU 满？DB 等待？连接池排队（pool_timeout 报错就是信号）？带宽？不同瓶颈的处方完全相反——CPU 密集加 worker 有用，池不足加 worker 只会更快炸。\n4. **优雅降级**：压到超限时，服务应该返回明确的 429/503 + 快速失败，而不是雪崩式超时（第 8 章限流、第 7 章 pool_timeout 都是为此存在）。\n\n上线门槛写成可验证的数字（例：p95 < 200ms、错误率 < 0.1%、CPU < 70% @ 200 并发），放进 CI/发布检查，而不是「感觉挺快」。"
+      }
+    ]
+  },
+
+  "ch11ex01": {
+    "title": "速查：一个函数签名里的七种参数来源",
+    "line_notes": [
+      { "line": 1, "kind": "note", "text": "整块是速查表：一个 PATCH 端点把七种参数来源排在一起。看第 3 章「参数三件套」的对照卡片用。" },
+      { "line": 3, "kind": "key", "text": "**路径参数**：类型 int 就自动转换 + 校验，装饰器里必须出现 `{task_id}`，名字要对上（名字不匹配时报的是「参数缺失」，很莫名）。" },
+      { "line": 4, "kind": "key", "text": "**请求体**：只有一个 Pydantic 模型参数时，整个 JSON 就是它。多个模型时要么 `Body(embed=True)`，要么合并成一个模型。" },
+      { "line": 5, "kind": "note", "text": "**查询参数**：`Annotated[bool, Query()] = False` 即 `?force=true`。裸写的标量参数（没有 Query）默认也是查询参数——所以「忘了写 Query」和「写了 Query」行为常常一样，模型参数则不一样（见第 3 章 query_model 的坑）。" },
+      { "line": 6, "kind": "note", "text": "**请求头**：`Header()` 把 `x_device` 映射到 `X-Device`（下划线自动转连字符）。想改变映射关系用 alias。" },
+      { "line": 7, "kind": "note", "text": "**Cookie**：`Cookie()` 取值。带 cookie 的跨源请求要 CORS 允许凭据且 SameSite 合适，本地调试时常见「cookie 明明在但读到 None」。" },
+      { "line": "8", "kind": "warn", "text": "依赖参数不要写 `= None`：`Depends(get_db)` 的默认值永远不会生效，写 `= None` 只会让类型标注变成 `AsyncSession | None`，于是你（和类型检查器）以为可能需要判空，实际上 FastAPI 一定会注入。真需要「可选依赖」的做法是让它自己的函数返回 None，或用 `Depends(optional_user)` 这种显式的可选版本。" },
+      { "line": 9, "kind": "note", "text": "`BackgroundTasks` 靠**类型**被识别并注入，不需要 Depends（写 `Depends()` 也能跑，但没必要）。同类还有 Request、Response，都是「特殊类型即注入」。\n\n同样这里用 `...` 当函数体，是片段写法，整块单独跑会 NameError。" }
+    ],
+    "concepts": [
+      {
+        "kind": "base",
+        "title": "速查表怎么用",
+        "body": "第 11 章不是「再学一遍」，是给你两面镜子：\n\n1. **写代码卡住时**：这张参数来源表 + 报错词典（附录另一半）。比如报 `Field required` 而字段明明可选——多半是来源写错了（模型被当 body 解析）。\n2. **review 代码时**：拿它做检查清单——端点里有没有手写校验（该进模型）、有没有裸 `return ORM 对象`（该有 response_model）、越权有没有落到 404（对象级权限）、异常有没有走统一 handler。\n\n配合本站的用法：每条不确定就搜到对应章节的例子，点那行看逐行注释，再用「▶ 运行」或「⇄ 当服务调用」当场验一次——记忆效果比读三遍好得多。"
+      }
+    ]
+  }
+}

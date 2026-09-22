@@ -47,8 +47,9 @@ def load_notes(
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            print(f"跳过 {path.name}：{exc}", file=sys.stderr)
-            continue
+            # 不静默跳过：少一个括号就吞掉一整章的解释，跑起来「成功」但内容不见了，
+            # 这种失败必须响。
+            raise SystemExit(f"notes 文件 {path.name} 读不了：{exc}") from exc
         for key, payload in data.items():
             if key == "_chapters":
                 for slug, meta in (payload or {}).items():
@@ -223,10 +224,19 @@ def _replace_notes(
     所以先清空并 flush，把删除真正落到库里，再写新内容。
     """
     built: list[LineNote] = []
+    seen: set[int] = set()
     for item in notes:
         line = int(item.get("line", 0))
         if line < 1 or not item.get("text"):
             continue
+        if line in seen:
+            # 库里 (example_id, line_no) 是唯一约束，重复行会让整次灌库崩在
+            # 一堆 SQLAlchemy 回溯里。这里提前拦，直接说是哪个例子的第几行。
+            raise SystemExit(
+                f"notes 冲突：{example.uid} 第 {line} 行有两条 line_notes"
+                "（同一行只能有一条，请用 to 合并成区间）"
+            )
+        seen.add(line)
         built.append(
             LineNote(
                 line_no=line,

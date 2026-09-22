@@ -1,0 +1,453 @@
+{
+  "_chapters": {
+    "ch06": {
+      "concepts": [
+        {
+          "kind": "arch",
+          "title": "分层不是为了好看，是为了让箭头只有一个方向",
+          "body": "目标依赖方向：`api（端点）→ services（业务）→ repositories（数据访问）→ db/models（表）`，`schemas` 作为跨层的 DTO 被大家引用，`core` 提供最外层的配置与安全工具。\n\n三条硬规则：\n\n1. **services 不 import fastapi**。它不知道 HTTP 存在，所以能被定时任务、CLI、消息消费者复用，也能被单元测试直接调用（不用起 TestClient）。\n2. **repositories 只认识 ORM 和语句**，不认识业务规则。它的所有公开方法都自带恒定条件（比如软删除过滤），让「忘记加 where」变成不可能。\n3. **端点层只做三件事**：解析入参（靠类型注解）、把活交给 service、把结果交给 response_model。\n\n拆分的时机不是「代码多了」，而是**同一个知识需要被改动两次**：加一个字段要同时改 5 个端点，或者一个业务规则在两个端点里写法不同。这时候不拆，下一次就是复制粘贴出 bug。"
+        },
+        {
+          "kind": "base",
+          "title": "配置只在一条链路上被读一次",
+          "body": "反面形态是 `os.getenv(\"DATABASE_URL\")` 散落在十几个文件里：同一个变量名有五种默认值，改名时改不干净，测试想覆盖只能 monkeypatch 环境。\n\n正解是一条链路：`.env` / 环境变量 → `Settings` 模型（带类型、范围、必填校验）→ `get_settings()` 用 `lru_cache` 变成单例 → 通过 `Depends(get_settings)` 注入到需要它的地方。配置因此获得三件东西：**启动即校验**（缺 secret_key 直接起不来，而不是运行到半夜 500）、**一处可查**、**测试可替换**（`app.dependency_overrides[get_settings] = lambda: fake_settings`）。\n\n顺带一条：`Settings` 是 pydantic-settings 的模型，所以「从环境读值」也走一遍校验和转换，环境变量都是字符串这件事被它吸收掉了。"
+        },
+        {
+          "kind": "compare",
+          "title": "create_app() 工厂 vs 模块级 app",
+          "body": "两种都能跑：\n\n- `app = create_app()` 放模块底部（本例）：`uvicorn app.main:app` 需要的就是这个名字，最简单。\n- 只暴露 `create_app(settings=None)`：测试里可以为不同配置各建一个 app（一份 prod 行为、一份带假 DB 的行为），互不污染。\n\n真正的风险点不在写法，而在**模块级副作用**：`get_settings()` 在导入时就解析 `.env`、`create_engine()` 在导入时就建池、日志在导入时就被改掉。这些都让「导入模块」变得昂贵且不可逆，测试之间会互相影响。工厂函数 + lifespan 的作用就是把它们推迟到明确的时刻去做。本站的 `app/main.py` 就是这么写的，可以对照看。"
+        }
+      ]
+    },
+
+    "ch07": {
+      "concepts": [
+        {
+          "kind": "base",
+          "title": "Session 是工作单元，不只是「一条连接」",
+          "body": "SQLAlchemy 的 Session 干三件事：持有连接、追踪你改过的对象（identity map）、把改动攒成一个**待提交的批次**。\n\n于是有两个必须建立的直觉：\n\n- `add()` / 改属性时**不发 SQL**；`flush()` 才把这一批 INSERT/UPDATE 发给数据库（此时事务还没结束，仍可回滚），这也是「flush 后能拿到自增 id」的原因；\n- `commit()` = flush + 结束事务。它不是「保存」，是「承认这批改动永久生效」。一次请求里 commit 几次，就发几次提交，也就锁多久。\n\n「查询返回的对象」和「数据库里的行」不是同一份东西：同一个事务里改过、但没 flush 的对象，用 SQL 直接查表是查不到的。这类困惑基本都是没弄清 flush/commit 的时机。"
+        },
+        {
+          "kind": "base",
+          "title": "异步下最疼的两个坑：expire_on_commit 与懒加载",
+          "body": "**其一**：Session 默认在 commit 后把所有对象标记为过期，下次访问属性就去 DB 重新读。同步时代价是一次隐式查询；异步时代价是「在协程里偷偷做同步 IO」，直接抛 `MissingGreenlet`。解法是 `expire_on_commit=False`（本站 session 就是这么建的），代价是你要清楚 commit 之后对象里是旧值。\n\n**其二**：`task.owner` 这类关系属性默认懒加载，第一次访问才查库——异步下同样是直接炸。所以关系必须**显式预加载**：`selectinload` / `joinedload`，或者只查需要的列做投影。异步 SQLAlchemy 没有「魔法般的自动加载」，这是它比同步啰嗦的地方，也是它诚实的地方。\n\n顺带一条：`select()` 传多个实体（`select(Task, User)`）会返回元组且不会把第二张表合并进 identity map，跨表查询要投影明确写列，别指望 `from ORM to ORM` 的隐式 join。"
+        },
+        {
+          "kind": "flow",
+          "title": "迁移是代码：autogenerate 能做什么、不能做什么",
+          "body": "`--autogenerate` 比较 `Base.metadata` 与数据库实际结构，生成差异脚本。它擅长加表、加列、加简单索引；它做不好或做错的有：\n\n- **改列名**会被识别成「删掉旧列 + 加新列」，直接跑就丢数据。要手写 `op.alter_column(..., new_column_name=...)`（并确认所用数据库支持重命名）。\n- **改类型 / 加非空列 / 加带默认值的列**需要数据迁移，autogenerate 只给你半个。\n- **约束、CHECK、server_default、部分索引、枚举**经常漏判或不准确。\n- **数据变更**（回填、拆分字段）必须自己写 `op.execute` 或批量脚本。\n- `downgrade` 经常是错的或没写——线上出问题时要清楚能不能回滚。\n\n所以流程是：生成 → **逐行 review** → 在副本库上 upgrade/downgrade 各跑一遍 → 再进 CI。另外把 `import 所有 models` 这件事放在 `alembic/env.py` 里，漏 import 的模型不会出现在 metadata 里，于是迁移「莫名其妙生成了删表语句」。"
+        },
+        {
+          "kind": "compare",
+          "title": "软删除的代价，以及怎么把它付清",
+          "body": "`deleted_at IS NULL` 这个条件必须在每个查询里出现，忘了就是一起「删不掉的数据又回来了」的事故。三种把风险收口的办法：\n\n1. **仓储层统一出口**（本例 `_visible()`）：所有读方法都从它开始，端点碰不到裸 select。\n2. **ORM 全局过滤**：`with_loader_criteria` / `do_orm_execute` 事件里自动加条件，彻底但要小心「后台任务想看全部数据」时怎么绕过。\n3. **物理删除 + 归档表**：数据量小、合规要求「真删」时反而更简单。\n\n还有一笔常被忽略的账：**唯一约束**。`(owner_id, title)` 唯一时，软删除的行仍然占着这个键，用户「删掉再建同名」会撞 409。解法是部分唯一索引（PG：`WHERE deleted_at IS NULL`）或把 `deleted_at` 并入唯一键。"
+        }
+      ]
+    }
+  },
+
+  "ch05ex01": {
+    "title": "没有 Depends 的世界：每个端点抄一遍",
+    "line_notes": [
+      { "line": 2, "kind": "note", "text": "只能自己拿 Request 对象，函数签名不再说明「这个接口需要什么」。" },
+      { "line": "3", "to": 5, "kind": "warn", "text": "解 Authorization、剥 `Bearer ` 前缀、验 token：每个受保护端点都要抄这四行。抄漏一个就是鉴权旁路——这类漏洞的特征正是「只有一个接口忘了」，代码评审最容易看漏。" },
+      { "line": 6, "kind": "warn", "text": "手动开的 session 要手动关。写在函数尾部容易在 raise 分支漏掉（异常时后面那行根本不执行），于是连接泄漏；泄漏到一定量就是「服务突然全 500，重启就好了」。" },
+      { "line": 7, "kind": "note", "text": "分页换算 `skip=(page-1)*20` 也重复，而且这里的 20 和查询参数 size 是两处常量，早晚会不一致。" },
+      { "line": 8, "kind": "key", "text": "真正的业务代码在第几行？还在往后找。这就是 Depends 要解决的三件事：鉴权、连接、公共换算，全部搬到执行链外面。" }
+    ],
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "把「前置工作」搬出函数体之后得到什么",
+        "body": "得到四样东西：\n\n1. **一份实现多处复用**：`current_user` 写一次，全站受保护接口都靠它；\n2. **失败在进入业务前**：没登录就是 401，业务代码里不用写 `if user is None`；\n3. **文档知道这件事**：/docs 会显示需要 Bearer 认证，前端一眼看懂怎么调；\n4. **测试能替换**：`app.dependency_overrides[current_user] = lambda: fake_user`，不用伪造 token。"
+      }
+    ]
+  },
+
+  "ch05ex03": {
+    "title": "依赖的三种挂法：参数级、路由级、路由器级",
+    "line_notes": [
+      { "line": "3", "to": 4, "kind": "key", "text": "A：需要用到依赖的结果时用这种。db 值被注进参数，函数里能直接用；同时 Annotated 保住了类型提示。" },
+      { "line": "6", "to": 8, "kind": "key", "text": "B：只做检查、不需要结果时用 `dependencies=[Depends(current_user)]`。它照样执行、照样能 raise 401 中断请求，只是不会把 User 注进参数。适合「必须登录」但不看用户身份内容的端点。" },
+      { "line": "10", "to": 12, "kind": "key", "text": "C：整块接口的共同前置条件挂 APIRouter 上——`/admin` 下所有路由都要 require_admin，不用逐条写，新加端点自动受保护。这是「默认安全」的做法：漏写的可能性归零。" },
+      { "line": 8, "kind": "note", "text": "三种挂法可以混用（本例 B 就同时有路由级和参数级）。同一个依赖在一次请求内默认只解析一次，所以重复声明不会重复执行，只影响「结果是否注进参数」。" }
+    ],
+    "concepts": [
+      {
+        "kind": "compare",
+        "title": "选哪种：看你要不要那个结果",
+        "body": "经验法则：\n\n- 要在函数里**用**这个值 → 参数级（A）；\n- 只需要它**执行并且可能失败**（鉴权、限流、特性开关）→ 路由级（B）；\n- 一组端点的共同前提（后台、租户、需要同一个 DB session）→ 路由器级（C）；\n- 别把 B 和 C 当「更省事的写法」：不注入结果的依赖拿不到值，业务里想「顺便知道当前用户」时就又得改回 A。"
+      }
+    ],
+    "api_cards": [
+      {
+        "name": "dependencies 参数",
+        "signature": "@router.get('/x', dependencies=[Depends(check)])  |  APIRouter(dependencies=[...])",
+        "kind": "api",
+        "summary": "执行依赖但丢弃其返回值；抛异常即中断请求。",
+        "params": [],
+        "returns": "无（不进函数签名）",
+        "gotcha": "路由级/路由器级依赖的执行顺序不要依赖。若两个检查有先后（先鉴权再限流），做成一条依赖链（限流依赖再 Depends 鉴权）才是确定的。"
+      }
+    ]
+  },
+
+  "ch05ex04": {
+    "title": "get_db：一个生成器管住事务与连接",
+    "concepts": [
+      {
+        "kind": "flow",
+        "title": "yield 把函数切成请求前与请求后",
+        "body": "FastAPI 执行依赖生成器的节奏：\n\n1. 跑到 `yield` 为止（开 session）→ 把 yield 出的值注给端点；\n2. 端点和响应序列化全部完成；\n3. 从 `yield` 之后继续跑（commit / 关闭 session）。\n\n因此：**成功路径自动 commit，抛异常走 except 分支 rollback 再重新抛出**，业务代码一行都不用写事务管理。这就是第 1 章那个「每个端点都要记得关」的解法。\n\n两个细节值得注意：一、commit 发生在响应已生成之后，所以如果 commit 本身失败（唯一约束在写入时才炸），客户端已经拿到 200 —— 强一致的「写入成功」语义要显式在 service 里 commit 并由异常处理器翻译；二、后台任务里不要依赖这个 session，它可能已经被关掉（第 9 章会讲后台任务的正确姿势）。"
+      }
+    ],
+    "line_notes": [
+      { "line": 4, "kind": "warn", "text": "expire_on_commit=False 在异步下几乎是必需的：默认 commit 后对象属性过期，再访问会触发同步 IO，直接 MissingGreenlet。代价是 commit 后对象里是旧值，需要新数据要显式 refresh。" },
+      { "line": "6", "to": 9, "kind": "key", "text": "async with 保证 session 被关闭；yield 前是准备，yield 后是收尾。类型注解 AsyncIterator[AsyncSession] 是让 FastAPI 认得出「这是个生成器依赖」。" },
+      { "line": "10", "to": 13, "kind": "key", "text": "commit 放在 yield 之后 = 只有整条链路没抛异常才提交；except 分支 rollback 后 **必须 raise**，吞掉异常会让客户端拿到一个「成功」但其实没写进去的响应。" }
+    ],
+    "api_cards": [
+      {
+        "name": "async_sessionmaker",
+        "signature": "SessionLocal = async_sessionmaker(engine, expire_on_commit=False)",
+        "kind": "api",
+        "summary": "2.0 里建 session 的工厂（替代 sessionmaker(bind=...) 老写法）。`async with SessionLocal() as s` 直接用。",
+        "params": [{ "name": "expire_on_commit", "type": "bool", "note": "异步场景建议 False" }, { "name": "autoflush", "type": "bool", "note": "默认 True：查询前自动 flush，会让约束错误在意外位置抛" }],
+        "returns": "AsyncSession 实例",
+        "gotcha": "它不是线程安全的 session 池，一个 session 别跨请求/跨任务共享；每个请求一个（就是 get_db 在做的事）。"
+      }
+    ]
+  },
+
+  "ch05ex05": {
+    "title": "同一请求内，相同依赖只算一次",
+    "line_notes": [
+      { "line": "1", "to": 3, "kind": "note", "text": "被依赖的函数。里面 print 是为了把「执行了几次」可视化。" },
+      { "line": "5", "to": 8, "kind": "key", "text": "x 和 y 都 Depends(expensive)，但 running 只打印一次：FastAPI 按「依赖函数 + 其子依赖的参数」做键，请求内缓存结果。这既是省时间的机制，也是「为什么我改了依赖里的值却看不到变化」的原因。" },
+      { "line": "10", "to": 11, "kind": "warn", "text": "确实要各算一次就 use_cache=False（比如要拿两个不同的随机 nonce、两次时间戳）。注意这块代码是从函数里剪出来的片段，第 11 行带缩进又不在函数内，整块跑会 IndentationError——徽章标「节选」就是这个意思。" }
+    ],
+    "api_cards": [
+      {
+        "name": "Depends(use_cache=)",
+        "signature": "Depends(dep, use_cache=True)",
+        "kind": "api",
+        "summary": "请求级缓存。缓存键只看依赖可调用对象与其依赖链，不看「在哪个端点被调用」。",
+        "params": [{ "name": "use_cache", "type": "bool", "note": "关掉才会在同一请求内重复执行" }],
+        "returns": "该请求内的同一份结果",
+        "gotcha": "它**不是跨请求缓存**：想跨请求复用要自己加 `lru_cache`（纯计算）或 Redis（外部状态）。也别在依赖里放可变全局状态，容易被当成缓存来误用。"
+      }
+    ]
+  },
+
+  "ch05ex06": {
+    "title": "认证依赖的完整一套：必填、可选、角色",
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "三个依赖如何协作",
+        "body": "`current_user` 是唯一的身份出口：解析 Bearer token → 校验 JWT → 查用户 → 检查是否启用 → 返回 User。所有需要「知道是谁」的地方都依赖它，因此改鉴权逻辑只有一处。\n\n`optional_user` 复用它并吞掉 401（游客可看内容、登录才有点赞状态）。注意它是**调用** current_user 而不是重写一遍解析，两者行为永远同步。\n\n`require_role` 是**依赖工厂**：接受角色列表、返回一个真正的依赖（闭包捕获 roles）。用在 `dependencies=[...]` 里做门禁，因为门禁只需要「成不成」，不需要 User 值。"
+      }
+    ],
+    "line_notes": [
+      { "line": 5, "kind": "key", "text": "auto_error=False 才有「没带头」这种可判断状态。默认 True 时 HTTPBearer 自己抛错，而且抛的是 **403**——对「根本没带凭证」的语义是错的，你要 401 就得自己接管这个分支。" },
+      { "line": "7", "to": 10, "kind": "note", "text": "依赖也可以是 async 函数，并可以有自己的依赖（bearer 是它、get_db 也是它），于是形成一棵依赖树，FastAPI 按拓扑顺序求解。" },
+      { "line": "11", "to": 13, "kind": "key", "text": "凭证缺失 → 401 + `WWW-Authenticate: Bearer`。这个响应头不是装饰：HTTP 语义里 401 必须说明用哪种方案，某些客户端据此决定是否弹登录。" },
+      { "line": 14, "kind": "warn", "text": "decode_jwt 负责「签名无效/过期」→ 内部 raise 401，别让它冒成 500。另外 `int(payload[\"sub\"])`：sub 不是数字会抛 ValueError 变 500，稳妥做法是包一层 try 或用 Pydantic 解析 claims。" },
+      { "line": "16", "to": 17, "kind": "note", "text": "用户被删或被禁用也回 401：身份已失效，而不是「你有问题」。这里不要回 403——403 意味着认证通过但没权限，语义完全不同。" },
+      { "line": "20", "to": 30, "kind": "key", "text": "可选登录：cred 为空返回 None；有 cred 但校验失败也返回 None（游客不该因为 token 过期就看到 401 页）。这是把「异常」转成「缺省值」，所以要显式捕 HTTPException 而不是 except Exception。" },
+      { "line": "32", "to": 37, "kind": "key", "text": "依赖工厂：外层函数只在导入时执行一次（闭包捕获 roles），返回的 checker 才是真正的依赖。`set(roles) & set(user.roles)` 是「任一命中即可」；要「全部命中」就换 issubset。" },
+      { "line": "39", "kind": "note", "text": "用 dependencies 挂工厂结果：只把门，不注入 User。角色不足 → 403。删除类接口还应叠加「是不是本人任务」的对象级判断，那是第 7 章 get_for_owner 在做的事。" }
+    ],
+    "api_cards": [
+      {
+        "name": "HTTPBearer",
+        "signature": "bearer = HTTPBearer(auto_error=False, scheme_name=\"API key\", description=\"JWT\")",
+        "kind": "api",
+        "summary": "把「从 Authorization 头取 Bearer 凭证」变成标准依赖，同时让 /docs 出现右上角的 Authorize 按钮。",
+        "params": [{ "name": "auto_error", "type": "bool", "note": "False 才能自己处理未认证分支" }, { "name": "scopes", "type": "list[str]", "note": "只影响文档里的 OAuth 提示，不做校验" }],
+        "returns": "HTTPAuthorizationCredentials(scheme, credentials) 或 None",
+        "gotcha": "它只负责取头，不验 token。用 OAuth2PasswordBearer 才有「表单式登录换 token」的文档语义；两者都要自己解码 JWT。"
+      },
+      {
+        "name": "401 vs 403",
+        "signature": "401 不知道你是谁（+ WWW-Authenticate） / 403 知道你是谁但不行",
+        "kind": "concept",
+        "summary": "前端逻辑差别真实存在：401 通常触发重新登录，403 只提示「权限不足」。",
+        "params": [],
+        "returns": "对客户端的可编程信号",
+        "gotcha": "token 过期是 401（要重新认证）；角色不够是 403。用 HTTPBearer 默认 auto_error=True 会把「没带 token」也变成 403，这就是本例关掉它的原因。"
+      }
+    ]
+  },
+
+  "ch06ex01": {
+    "title": "拆开 1200 行的 main.py：目录即依赖方向",
+    "line_notes": [
+      { "line": 4, "kind": "key", "text": "main.py 只剩装配：建 app、挂中间件、注册路由。判断拆得对不对的第一眼就在这里——它有没有再写任何业务逻辑。" },
+      { "line": 6, "kind": "note", "text": "deps.py 是公共依赖的家：get_db、current_user、pagination。端点 import 它，而不是彼此抄。" },
+      { "line": "8", "to": 12, "kind": "note", "text": "v1/router.py 汇总，endpoints 一个业务一个文件。URL 前缀在汇总处给（第 3 个例子），端点文件里只写自己那段路径。" },
+      { "line": "13", "to": 17, "kind": "note", "text": "core 是「不含业务的外壳件」：配置、安全、异常、日志。它们可以被任何层引用，但不引用业务层，因此不会形成环。" },
+      { "line": "18", "to": 22, "kind": "note", "text": "db（表模型 + session）与 schemas（DTO）分家，是防泄漏的结构前提：出参模型里没写的字段就出不去，ORM 对象不会被直接 return 到全世界。" },
+      { "line": "23", "to": 24, "kind": "key", "text": "repositories 只和 SQLAlchemy 打交道，services 只写业务规则。**services 绝不 import fastapi**：这一条守住了，业务就能被 CLI、定时任务、测试直接调用；守不住，两层会重新长回一坨。" }
+    ]
+  },
+
+  "ch06ex02": {
+    "title": "配置：一个模型、一条链路、一个单例",
+    "line_notes": [
+      { "line": "5", "to": 7, "kind": "note", "text": "BaseSettings 把 .env / 环境变量按字段声明读进来。extra=\"ignore\" 让多余的变量不报错（部署环境里总有没用的键）；case_sensitive=False 便于大小写混着配。" },
+      { "line": 10, "kind": "note", "text": "pattern 约束枚举式配置：env 只能 dev/staging/prod。写错成 production 会在启动时报错，而不是 `is_prod` 静默为 False、文档页在生产被打开。" },
+      { "line": 18, "kind": "key", "text": "secret_key 故意不给默认值 + min_length=32：忘配就启动失败。**这比「给个默认值」安全**——默认密钥会被带上线，且没人会发现。fail fast 是配置设计的核心原则。" },
+      { "line": 21, "kind": "warn", "text": "list[str] 从环境变量读时按 JSON 解析，得写 `[\"http://localhost:5173\"]`。想按逗号分隔，要加一个 `@field_validator(\"cors_origins\", mode=\"before\")` 把字符串 split 成列表。这是 pydantic-settings 最常见的第一次困惑。" },
+      { "line": "23", "to": 26, "kind": "key", "text": "computed_field 让 `is_prod` 参与序列化并出现在模型上，但不是环境变量。派生判断集中一处，端点里就不用在写 `settings.env == \"prod\"`。" },
+      { "line": "28", "to": 30, "kind": "key", "text": "lru_cache 把 Settings 变成进程内单例：.env 只解析一次，`Depends(get_settings)` 每次注入都是同一对象，开销为零。测试时想换配置，用 dependency_overrides 覆盖 get_settings，而不是去 monkeypatch 环境变量。" }
+    ],
+    "api_cards": [
+      {
+        "name": "BaseSettings / SettingsConfigDict",
+        "signature": "class Settings(BaseSettings): model_config = SettingsConfigDict(env_file=\".env\", env_nested_delimiter=\"__\", extra=\"ignore\")",
+        "kind": "api",
+        "summary": "把环境变量按类型读进模型；支持别名、嵌套键、多来源。",
+        "params": [{ "name": "env_file", "type": "str | list", "note": "生产一般只注入环境变量；.env 不进 git，仓库里放 .env.example" }, { "name": "env_prefix", "type": "str", "note": "本站用 PLW_，避免和其他程序的变量撞名" }],
+        "returns": "校验后的配置对象",
+        "gotcha": "`.env` 只在该进程的工作目录下会被找到：从别处启动 uvicorn 就会「明明有 .env 却读不到」。排查先看 `pwd`。"
+      },
+      {
+        "name": "functools.lru_cache",
+        "signature": "@lru_cache\\ndef get_settings() -> Settings: ...",
+        "kind": "api",
+        "summary": "按参数做键缓存返回值。用在无参工厂上就是单例。",
+        "params": [{ "name": "maxsize", "type": "int | None", "note": "None 表示不淘汰；单例工厂用默认值即可" }],
+        "returns": "同一对象",
+        "gotcha": "缓存的是**对象**：如果代码里有人就地改 settings.debug，全局都被污染。要可变就把它当配置项注入，别改单例。"
+      }
+    ]
+  },
+
+  "ch06ex03": {
+    "title": "两级 include：端点不知道自己前缀",
+    "line_notes": [
+      { "line": 4, "kind": "note", "text": "汇总用的 router 不带 prefix，它只负责拼。" },
+      { "line": "5", "to": 7, "kind": "key", "text": "前缀和 tags 在汇总处统一给：端点文件里只写 `/`、`/{tid}` 这样的相对路径。好处是改 URL 只改一行、端点文件可以整体搬走复用；同时 tags 决定 /docs 分组，一处配好，不会有的文件写了有的没写。" }
+    ],
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "URL 由三段拼出来，每段只有一个负责人",
+        "body": "`settings.api_prefix`（/api/v1，全局版本与网关前缀）+ 汇总处给的 `prefix`（/tasks，业务域）+ 端点装饰器里的相对路径（`/{tid}`）。\n\n规则：**同一段路径不要在两个地方各写一半**。比如 tasks.py 里写 `@router.get(\"/tasks\")` 又给 router 加 prefix=/tasks，就变成 /tasks/tasks；想改 URL 时得改三处。端点保持「不知道自己在哪个域下」，是整个分层能搬动的前提。"
+      }
+    ]
+  },
+
+  "ch06ex04": {
+    "title": "main.py 只做装配：lifespan、CORS、注册路由",
+    "line_notes": [
+      { "line": 10, "kind": "warn", "text": "模块级调用 get_settings() 意味着「导入即读 .env」。这里可接受（lru_cache 保证只解析一次），但要清楚副作用：任何 import 这个模块的测试都会受 .env 影响。测试里更干净的做法是在 fixture 里设环境变量后再导入 app。" },
+      { "line": "12", "to": 21, "kind": "key", "text": "lifespan 取代已废弃的 `@app.on_event(\"startup\")`。yield 之前是启动准备，之后是关闭清理；包在 try/finally 里保证异常退出也会 dispose 连接池。`app.state` 是放这类长生命周期对象的官方位置。" },
+      { "line": 17, "kind": "note", "text": "warmup（建池、检查表结构、加载慢启动依赖）把首次请求的成本挪到启动期：宁可部署时失败，不要上线第一分钟全量超时。" },
+      { "line": "23", "to": 37, "kind": "key", "text": "create_app() 工厂 + 底部 `app = create_app()`：既保留 `uvicorn app.main:app` 的简单写法，又允许测试里再建一个带假依赖的 app。" },
+      { "line": "31", "to": 35, "kind": "warn", "text": "allow_credentials=True 时 `allow_origins` 不能写 \"*\"（浏览器会拒绝带 cookie 的跨源响应），必须列明确来源。另外这里的方法列表漏了 PUT——该方法的预检会被拒，接口看起来「偶发 405/CORS 错」。" },
+      { "line": 36, "kind": "note", "text": "include_router 时给全局前缀，配合上一条第 2 点的 api_prefix 配置：改一次配置就能整体搬 URL（或同时挂 v1/v2）。" }
+    ],
+    "concepts": [
+      {
+        "kind": "flow",
+        "title": "启动期该做什么，不该做什么",
+        "body": "该做：解析配置并校验、建连接池并暖机、初始化日志与追踪、注册信号、跑迁移检查（确认版本一致而不是自动迁移）、预热缓存或字典表。\n\n不该做：在 lifespan 里 `create_all()` 代替迁移（生产表结构漂移的根源）；做几十秒的重活（会被编排系统判定启动失败而反复重启，探针要配 startupProbe）；起后台循环任务却不保存句柄（关闭时等不到它退出，或被硬杀）。\n\n注意 uvicorn 会转发 SIGTERM：`yield` 之后的清理代码因此会跑，这叫优雅退出——但如果外部还在打流量，要先摘流量（就绪探针返回 503）再关连接池。"
+      }
+    ],
+    "api_cards": [
+      {
+        "name": "lifespan",
+        "signature": "@asynccontextmanager\\nasync def lifespan(app: FastAPI):\\n    ...setup...\\n    yield\\n    ...teardown...",
+        "kind": "api",
+        "summary": "一个异步上下文管理器，同时表达启动与关闭，共享局部变量（不必都挂 app.state）。",
+        "params": [{ "name": "app", "type": "FastAPI", "note": "可把资源放 app.state，或 yield 一个 dict 供端点 request.state 使用" }],
+        "returns": "上下文管理器",
+        "gotcha": "lifespan 只在服务启动时跑一次。TestClient 要用它必须写成 `with TestClient(app) as c:`；直接 `TestClient(app)` 不会执行启动代码。"
+      },
+      {
+        "name": "CORSMiddleware",
+        "signature": "add_middleware(CORSMiddleware, allow_origins=[...], allow_credentials=True, allow_methods=[...], allow_headers=[...], allow_origin_regex=...)",
+        "kind": "api",
+        "summary": "处理浏览器的预检（OPTIONS）与实际响应的 CORS 头，应用代码不需要写 OPTIONS 路由。",
+        "params": [{ "name": "allow_origin_regex", "type": "str", "note": "预览环境这类动态子域用正则，别用 \"*\" + credentials" }, { "name": "max_age", "type": "int", "note": "预检缓存秒数，配小了 OPTIONS 会很多" }],
+        "returns": "中间件",
+        "gotcha": "CORS 只拦浏览器。curl、服务端 SDK、脚本都不受它约束——它**不是**授权机制，鉴权必须自己做。"
+      }
+    ]
+  },
+
+  "ch06ex05": {
+    "title": "端点的标准形状：三段式，五行完事",
+    "line_notes": [
+      { "line": 3, "kind": "note", "text": "路径写空串：完整 URL 来自 api_prefix + 汇总处 prefix，端点不知道自己在 /tasks 下。" },
+      { "line": "4", "to": 8, "kind": "key", "text": "参数三行就是全部契约：入参模型、数据会话、当前用户。职责清晰后，签名比函数体还长是正常现象。" },
+      { "line": 9, "kind": "key", "text": "业务交给 service，端点里没有任何 SQL 或规则判断。想测这条规则，直接测 TaskService.create，不用起 HTTP。" },
+      { "line": 10, "kind": "warn", "text": "这里显式 commit，而 get_db 在收尾时也会 commit 一次。两者并存不出错（第二次没有待提交内容），但语义重复：要么统一「由依赖收尾」（端点只 return），要么统一「service 层提交」。本站 app/db.py 选的是后者，配合 `expire_on_commit=False` 用。" },
+      { "line": 11, "kind": "note", "text": "return ORM 对象，由 response_model=TaskOut 决定输出形状——第 1 个例子里的裁剪在这里兑现。" }
+    ],
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "一个端点该有几行",
+        "body": "健康线是：**签名交代契约，函数体交代编排**。如果端点里出现以下任一内容，就该往下挪一层：\n\n- SQL / `select(...)` → repository\n- 业务规则、状态机、配额判断 → service\n- `raise HTTPException`（除「资源不存在」这类边界翻译）→ 让领域异常 + 全局 handler 处理\n- 手数组装响应 dict → response_model / 出参模型\n\n反过来，端点里**应该**看到的是：入参类型、依赖、一次 service 调用、一次返回。看到第 1 章那个 20 行校验端点，就说明契约没建在模型上。"
+      }
+    ]
+  },
+
+  "ch07ex01": {
+    "title": "2.0 风格表模型：类型注解就是列定义",
+    "line_notes": [
+      { "line": "5", "to": 6, "kind": "key", "text": "DeclarativeBase 子类替代老式 declarative_base() 工厂函数：能被子类化、能被类型检查器看清 metadata，alembic 也直接用它。" },
+      { "line": 11, "kind": "note", "text": "`Mapped[int]` + primary_key 就够：整数主键自动是自增主键，不必写 Integer 和 autoincrement。" },
+      { "line": 12, "kind": "note", "text": "String(200) 是给 MySQL/Oracle 这类需要长度的库看的；PostgreSQL 下裸 String 就是 TEXT。index=True 是「这张表会被按 title 搜」的声明，别凭感觉加索引。" },
+      { "line": 13, "kind": "key", "text": "`Mapped[str | None]` 自动推出 nullable=True——2.0 最漂亮的改进之一：可空性由类型表达，不再单独写一处 Boolean，类型和 DDL 不会互相打架。" },
+      { "line": "14", "to": 15, "kind": "warn", "text": "`default=` 是 **Python 侧**默认值：由 ORM 在 INSERT 时填。绕过 ORM 的裸 SQL/批量 COPY 不会应用它，于是同一列可能出现 NULL。要数据库兜底就再加 server_default。" },
+      { "line": 16, "kind": "note", "text": "外键 + index=True：外键列几乎总被用于 join 和「删父表时检查子表」，PG 不会因为加了 FK 就自动给该列建索引。" },
+      { "line": "19", "to": 22, "kind": "key", "text": "时间戳一律带时区（DateTime(timezone=True)）+ server_default=func.now() 由数据库生成，避免多实例时钟差；updated_at 再加 onupdate=func.now()，SQL 侧自动更新，应用代码忘了改也不会失同步。" },
+      { "line": 23, "kind": "note", "text": "软删除列可空：NULL 表示未删除。查询必须带 `deleted_at IS NULL`——第 2 个例子的仓储层就是为收口这个条件而存在。" },
+      { "line": "25", "to": 26, "kind": "key", "text": "relationship 用字符串前向引用避免循环 import；back_populates 两侧都要写，否则反向属性不存在。`Mapped[\"Project | None\"]` 声明为可空 → 这是 many-to-one，不加 uselist。" },
+      { "line": "28", "to": 29, "kind": "note", "text": "把「怎么算删除」放进模型，避免出现 `task.deleted_at = \"1\"` 这种写法。注意 `datetime.UTC` 常量是 Python 3.11+ 才有的别名（3.10 要写 timezone.utc）。" }
+    ],
+    "api_cards": [
+      {
+        "name": "Mapped / mapped_column",
+        "signature": "title: Mapped[str] = mapped_column(String(200), index=True)",
+        "kind": "api",
+        "summary": "2.0 的列声明：类型注解给类型检查器，mapped_column 给 DDL 与 ORM 行为。",
+        "params": [{ "name": "default / server_default", "type": "值 / SQL 表达式", "note": "Python 侧 / 数据库侧，语义不同，见上方注释" }, { "name": "onupdate", "type": "callable | 表达式", "note": "UPDATE 时自动赋值" }, { "name": "init=False", "type": "flag", "note": "由 __init__ 排除该字段（例如只在数据库生成的列）" }],
+        "returns": "列属性描述符",
+        "gotcha": "`Mapped[list[Task]]` 与 relationship 同时用于一对多时，注解必须写成 `Mapped[list[\"Task\"]]`；用 `Mapped[\"Task\"]` 表示多对一，写错会得到「一个 task 的 owners 是标量」的怪行为。"
+      }
+    ]
+  },
+
+  "ch07ex02": {
+    "title": "仓储层：恒定条件、可组合过滤、分页与 flush",
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "这个文件管什么，不管什么",
+        "body": "TaskRepo 是唯一允许写 SQL/ORM 语句的地方，它提供：带恒定条件（软删除）的基础查询、可按条件叠加的过滤器、分页与计数、按 owner 取单条（把权限条件写进查询而不是查完再比）、以及新增并 flush 拿 id。\n\n它**不管**业务规则（配额、状态流转）、不抛 HTTP 异常、不认识 Pydantic 模型（TaskFilter 是它自己的输入契约）。这样 service 层能被直接测试，也这样同一份查询逻辑不会在 5 个端点里长出 5 个变体。"
+      }
+    ],
+    "line_notes": [
+      { "line": "10", "to": 11, "kind": "key", "text": "软删除过滤收口成 `_visible()`：所有读路径从它起步。收口的价值是把「记得加条件」这件事从人的责任心变成结构。" },
+      { "line": "13", "to": 20, "kind": "key", "text": "过滤条件是**可组合的纯函数**（拿到语句，返回新语句）。注意 `is_(f.done)` 而不是 `== f.done`：用 `==` 比较布尔列时传 None 会生成 `= NULL`（永远不成立）。is_/is_not 才表达「IS」。" },
+      { "line": 16, "kind": "warn", "text": "`if f.owner_id:` 用真值判「有没有传」，于是 owner_id=0 会被当成不过滤。数据库 id 从 1 起所以此刻没事，但判空最好统一写 `is not None`，把 0 是否合法显式决定。" },
+      { "line": "22", "to": 30, "kind": "key", "text": "分页两条语句：count 与取行，共用同一份 where。count 用 `stmt.order_by(None).subquery()` 包一层——`order_by(None)` 清掉排序（排序对计数无意义且可能让子查询非法），子查询让 COUNT 的行数与语义对齐。" },
+      { "line": 30, "kind": "note", "text": "`total or 0` 是因为空表 count 经异步驱动有时返回 None 而非 0；返回类型是 tuple[list[Task], int]，别把 Result 对象直接扔给上层。" },
+      { "line": "32", "to": 33, "kind": "key", "text": "get_for_owner 把 owner_id 写进 where：越权访问直接查不到，上层统一按 404 处理，而不是 403。这既省一次查询，也**不泄露资源是否存在**——403 会告诉攻击者「这个 id 是别人的有效资源」。" },
+      { "line": "35", "to": 39, "kind": "key", "text": "flush 而非 commit：把 INSERT 发出去拿到自增 id（响应里要返回 id），但事务还没结束，同一请求里后续失败仍能整体回滚。提交时机交给第 5 章那个依赖收尾，或 service 显式 commit。" }
+    ],
+    "api_cards": [
+      {
+        "name": "db.scalar / db.scalars",
+        "signature": "total = await db.scalar(select(func.count())...); rows = await db.scalars(stmt)",
+        "kind": "api",
+        "summary": "取单值 / 取第一列实体。2.0 里 execute() 返回 Result，要 .scalars()/.scalar_one_or_none() 才拿到对象。",
+        "params": [{ "name": "unique()", "type": "方法", "note": "带 join 的批量写入/加载要 .unique()，否则重复行不会合并" }],
+        "returns": "标量 / ScalarResult",
+        "gotcha": "忘了 .scalars() 会拿到 Row 元组，报错信息非常迷惑（`AttributeError: 'Row' object has no attribute 'title'`）。"
+      }
+    ]
+  },
+
+  "ch07ex03": {
+    "title": "服务层与领域异常：业务只抛自己的错误",
+    "line_notes": [
+      { "line": "1", "to": 9, "kind": "key", "text": "core/exceptions.py 定义领域异常。服务层 raise BusinessError/NotFound，不 raise HTTPException——于是 service 不依赖 FastAPI，能被任何调用方复用。第 9 章用 exception handler 把它翻译成 HTTP 响应。" },
+      { "line": 3, "kind": "warn", "text": "这里把 status_code 一并塞进异常，是常见折中（少一层映射、状态码和业务规则放一起）。更严格的解耦是异常只带 code，由表示层决定状态码——两处都能自圆其说，关键是**全项目选一种**，别一半一半。" },
+      { "line": "12", "to": 16, "kind": "note", "text": "Service 构造时接收 repo（依赖注入的手动版）：测试里塞一个假 repo 就能验证规则，不连数据库。MAX_ACTIVE 作为类常量，改限制只动一处。" },
+      { "line": "18", "to": 21, "kind": "key", "text": "创建前查配额：复用 repo.page 只取 total（limit 给 1，不拉数据行），超限抛业务异常。`_, active =` 表明这里只要计数——这类「只用一个字段却拿整个元组」的写法值得配注释，否则后人会以为漏用了 rows。" },
+      { "line": 22, "kind": "note", "text": "payload.model_dump() 展开成列名，owner_id 由服务端注入——**绝不能让客户端能传 owner_id**。这是出/入参模型必须分开的实际理由之一（第 4 章）。" },
+      { "line": "24", "to": 29, "kind": "key", "text": "finish 用 get_for_owner 一次完成「取 + 判归属」，查不到就是 NotFound → 404。对象级权限（这条数据是不是你的）在这里，而不是角色检查（第 5 章 require_role）那里——两者是不同的问题。" }
+    ],
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "领域异常换来了什么",
+        "body": "三点：\n\n1. 业务层与 HTTP 解耦，能被脚本/任务/测试直接调用；\n2. 错误语义集中：「任务不存在」在 Web 里是 404、在 CLI 里是一句提示、在指标里是一个 code，都由异常类型驱动；\n3. 端点层可以不写 try/except：第 9 章注册 handler 之后，任何层抛 BusinessError 都会被统一翻译成响应体，端点保持五行以内。\n\n代价：多一层类型，以及 handler 必须存在——忘了注册时，领域异常会变成 500（而且回溯里看不出是业务拒绝）。"
+      }
+    ]
+  },
+
+  "ch07ex04": {
+    "title": "N+1：异步下它不是慢，是直接报错",
+    "line_notes": [
+      { "line": "5", "to": 7, "kind": "key", "text": "第一段是经典的 N+1：一条查 1000 行，循环里每次访问 `t.owner` 都触发一条 SELECT。同步世界里它是「慢」；异步世界里懒加载会抛 `MissingGreenlet`，等于直接崩。所以异步 SQLAlchemy 没有「顺手访问关系」这回事。" },
+      { "line": 10, "kind": "warn", "text": "selectinload 修掉它，但注意它**不是一条 JOIN**：仍然是两条语句（先查 Task 列表，再用 `WHERE tasks.owner_id IN (...)` 批量取 owner）。注释写「一次 JOIN 带出来」不准确——要真·一条 JOIN 是 joinedload。" },
+      { "line": 13, "kind": "key", "text": "只要三列时直接投影最省：不构造 ORM 实体、不带 identity map、不多查列。代价是拿到的是 Row 元组，得手工组装 DTO，且改字段时编译器不会提醒你。" }
+    ],
+    "concepts": [
+      {
+        "kind": "compare",
+        "title": "selectinload / joinedload / 投影：三选一",
+        "body": "- `selectinload(Task.owner)`：多对一、一对多都可用，两条语句，不会被重复行放大。**默认选它**，列表接口最划算。\n- `joinedload(Task.owner)`：一条 SQL LEFT JOIN。单条查询（按 id 取一条）时最省；列表上用它要注意重复行放大与 `unique()` 要求，且一对多 join 会明显放大结果集（`selectinload` 更适合集合）。\n- **显式投影 `select(Task.id, User.email).join(User)`**：只要少数字段、或要做聚合时最省。返回 Row，不进 identity map，别指望改它就能保存回去。\n- `raiseload(...)`：给关系设「一访问就抛」的护栏，在异步项目里非常推荐——它把「偶发 MissingGreenlet」变成「立刻、指名道姓地报错」。"
+      }
+    ],
+    "api_cards": [
+      {
+        "name": "selectinload / joinedload",
+        "signature": "select(Task).options(selectinload(Task.owner)) / joinedload(Task.comments)",
+        "kind": "api",
+        "summary": "加载策略：前者发第二条 IN 查询，后者在语句里 JOIN。",
+        "params": [{ "name": "noload / raiseload", "type": "options", "note": "明确不要 / 禁止访问，异步项目用来暴露问题" }],
+        "returns": "带预加载的语句",
+        "gotcha": "预加载写在 repository 里，但 service 只用 `task.owner.email` 一个字段时，整张 owner 都查了——性能问题往往不是「忘了 join」，而是「预加载粒度比需求粗」。"
+      }
+    ]
+  },
+
+  "ch07ex05": {
+    "title": "alembic 五步：从改模型到改表结构",
+    "line_notes": [
+      { "line": "2", "to": 3, "kind": "key", "text": "env.py 里必须做两件事：`target_metadata = Base.metadata`，并且 **import 到所有 models**。漏 import 的模型不在 metadata 里，autogenerate 会认为「这表该删」——生成 `DROP TABLE` 是这套工具最经典的事故。" },
+      { "line": 4, "kind": "warn", "text": "autogenerate 是「生成草稿」，不是「生成迁移」。生成的脚本必须逐行看：改列名会被写成 drop+add（丢数据），改类型/约束常缺 USING 子句，server_default 与部分索引容易漏判。" },
+      { "line": 5, "kind": "note", "text": "`upgrade head` 该由部署流程作为一次性任务跑（K8s Job / release command），不要每个 worker 启动时都跑一遍：多副本并发执行同一条迁移会互相踩。" },
+      { "line": 6, "kind": "warn", "text": "downgrade 默认值是可回滚，现实是经常没写或写错。至少保证「升级前备份、生产不跑不可回滚的破坏性变更」：大表删列、改类型都走「先加新列、双写、迁数据、再切读、最后删旧列」的展开式迁移。" }
+    ],
+    "concepts": [
+      {
+        "kind": "flow",
+        "title": "一次安全的 schema 变更",
+        "body": "1. 改 ORM 模型（或先决定表结构，再改模型）；\n2. `alembic revision --autogenerate`，**打开生成的脚本读一遍**；\n3. 本地空库 `upgrade head` → 再 `downgrade -1` → 再 `upgrade head`，来回都通才叫可用；\n4. 在测试/预发环境的**生产数据副本**上跑一次，看耗时与锁；\n5. 部署：先跑迁移再滚新代码（或代码向后兼容一个版本），避免「新代码 + 旧表结构」的窗口；\n6. 迁移脚本进 git 与代码同版本，且**永不修改已上线的迁移**——要改就加新的。"
+      }
+    ],
+    "api_cards": [
+      {
+        "name": "alembic（命令）",
+        "signature": "alembic current | heads | history | revision -m \"...\" | upgrade head | downgrade -1",
+        "kind": "api",
+        "summary": "版本化数据库结构。alembic_version 表记录当前版本，迁移脚本有 down_revision 形成链条。",
+        "params": [{ "name": "--autogenerate", "type": "flag", "note": "比较 metadata 与库；空库上生成的是完整建表脚本" }],
+        "returns": "versions/ 下的迁移文件",
+        "gotcha": "出现两个 head（两人各自生成迁移）时 upgrade 会报错。要么合并（merge revision），要么约定分支纪律，别手改 down_revision 拼一条假链。"
+      }
+    ]
+  },
+
+  "ch07ex06": {
+    "title": "连接池参数：每一行对应一种线上故障",
+    "line_notes": [
+      { "line": "3", "to": 4, "kind": "note", "text": "pool_size 常驻 + max_overflow 突发 = 峰值 15 条连接。这两个数要和数据库的 max_connections 以及实例数相乘对照：4 个 worker × 15 = 60 条，别忘了后台任务和迁移也要连。" },
+      { "line": 5, "kind": "key", "text": "pool_timeout=5 是「拿不到连接就快速失败」。默认是无限等，于是慢查询把池占满后，整个服务挂在那里排队而不是明确报错——这属于「故障时看不出问题」的经典配置。" },
+      { "line": 6, "kind": "key", "text": "pool_recycle=1800：连接比负载均衡/数据库的空闲超时活得久，否则会撞到 MySQL 的 `wait_timeout` 或 LB 静默掐线，表现为「偶发连接错误，重试就好」。" },
+      { "line": 7, "kind": "note", "text": "pool_pre_ping 取用前先跑一条轻量 ping，拿到已死连接就丢弃重建。它和 recycle 是互补的：一个防到点，一个防意外。" },
+      { "line": 8, "kind": "note", "text": "application_name 让 DBA 在 pg_stat_activity 里一眼看出是哪个服务连的。这一行在你被数据库同学@时非常值钱。" },
+      { "line": 14, "kind": "warn", "text": "但注意：这些池参数在 SQLite（本例默认 database_url 是 sqlite+aiosqlite）上不生效或行为不同——SQLite 文件库通常用 QueuePool/NullPool，`server_settings` 也是 PG 专有。换库时这段配置要一起改，否则要么报错要么静默无效。" }
+    ],
+    "api_cards": [
+      {
+        "name": "create_async_engine",
+        "signature": "create_async_engine(url, pool_size, max_overflow, pool_timeout, pool_recycle, pool_pre_ping, echo)",
+        "kind": "api",
+        "summary": "异步引擎：连接池 + dialect。放模块级建一次，别在请求里建。",
+        "params": [{ "name": "echo", "type": "bool", "note": "打 SQL 用来自查，生产常关（日志量巨大）" }, { "name": "future", "type": "bool", "note": "2.0 起默认行为，无需再写" }],
+        "returns": "AsyncEngine",
+        "gotcha": "进程 fork 之后不要复用父进程创建的引擎（连接 fd 会被两个进程共用，表现为随机错乱）。多 worker 交给 uvicorn 在启动后各自建，或用 lifespan。"
+      }
+    ]
+  }
+}

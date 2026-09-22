@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from sqlalchemy import func, select
 
 from app.config import get_settings
@@ -53,6 +54,25 @@ def test_notes_files_are_discoverable():
     assert "ch01" in chapters, "_chapters 键下的章级内容要单独归一张表"
     assert examples["ch01ex01"]["line_notes"][0]["text"]
     assert chapters["ch01"]["concepts"], "第 1 章应该有基础概念"
+
+
+def test_broken_notes_file_fails_loudly(tmp_path):
+    """notes 文件语法错必须响，不能「跳过 + 报成功」——那会静默吞掉整章解释。"""
+    (tmp_path / "好的.json").write_text('{"ch00ex01": {"title": "x"}}', encoding="utf-8")
+    (tmp_path / "坏括号.json").write_text('{"ch01ex01": {"title": "x"', encoding="utf-8")
+    with pytest.raises(SystemExit) as boom:
+        load_notes(tmp_path)
+    assert "坏括号.json" in str(boom.value)
+
+
+def test_every_chapter_has_some_content():
+    """内容进度哨兵：哪一章整体空着，这里先响，而不是等页面上看到一片空白。"""
+    examples, chapters = load_notes(get_settings().notes_dir)
+    by_chapter: dict[str, int] = {}
+    for uid in examples:
+        by_chapter[uid[:4]] = by_chapter.get(uid[:4], 0) + 1
+    assert len(by_chapter) == 12, f"12 章都该有内容，现在只有 {sorted(by_chapter)}"
+    assert set(chapters) >= {"ch01", "ch02", "ch03", "ch04", "ch05", "ch06", "ch07"}
 
 
 def test_seeding_twice_is_idempotent():
@@ -108,6 +128,22 @@ def test_seeding_twice_is_idempotent():
 
     assert first == second, "重复灌库不该改变行数"
     assert first[3] >= 2, "例级 + 章级概念都要落库"
+
+
+def test_duplicate_line_note_is_named():
+    """同一行写了两条解释要指名道姓地报错，而不是抛 SQLAlchemy 回溯。"""
+    notes = {"ch02ex01": {"line_notes": [
+        {"line": 3, "text": "第一条"},
+        {"line": 3, "text": "第二条撞车"},
+    ]}}
+    init_db()
+    payload = json.loads(get_settings().seed_path.read_text(encoding="utf-8"))
+    with SessionLocal() as session:
+        with pytest.raises(SystemExit) as boom:
+            sync(session, payload, notes, do_probe=False, only_chapter=2,
+                 settings=get_settings())
+        session.rollback()
+    assert "ch02ex01" in str(boom.value) and "第 3 行" in str(boom.value)
 
 
 def test_stale_examples_get_pruned():

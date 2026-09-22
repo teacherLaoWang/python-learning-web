@@ -3,6 +3,9 @@
 把 `../FastAPI-learn/fastapi-入门教程.html` 里的 **12 章 / 60 个代码块**抽成结构化数据，
 做成一个「点开任意一行代码 → 看逐行解释 → 直接改直接跑」的学习站。
 
+内容完成度：**60 个代码块全部有逐行注释**（330 条）、章级+例级概念 83 篇、API 卡片 55 张。
+第 11 章（附录）暂无章级概念，其余 11 章都有。
+
 - 后端：FastAPI + SQLAlchemy 2.0 + SQLite，负责内容与执行
 - 前端：纯静态 HTML/CSS/JS，**没有构建步骤、不引任何 CDN**
 - 执行：真·本机 CPython（项目的 `.venv`），在受限子进程里跑
@@ -65,7 +68,7 @@ data/
 ├── notes/*.json     中文标题 + 逐行解释 + 概念 + API 卡片 —— 内容真相源
 ├── app.db           SQLite（不提交）
 └── runs/<uid>/      例子的工作目录（不提交；同一例子的工作目录会复用）
-tests/               test_sandbox.py（15）· test_probe.py（9）· test_seed.py（3）· test_api.py（19）
+tests/               test_sandbox.py（15）· test_probe.py（9）· test_seed.py（6）· test_api.py（20）
 ```
 
 ## 补内容（这是这个站最有价值的部分）
@@ -153,7 +156,7 @@ tests/               test_sandbox.py（15）· test_probe.py（9）· test_seed.
 ## 测试
 
 ```bash
-uv run pytest              # 47 条：沙箱 15 · 识别与判定 9 · 灌库 3 · 接口 20
+uv run pytest              # 50 条：沙箱 15 · 识别与判定 9 · 灌库 6 · 接口 20
 uv run ruff check app tools tests
 uv run ruff format app tools tests
 ```

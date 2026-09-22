@@ -1,0 +1,238 @@
+{
+  "_chapters": {
+    "ch00": {
+      "concepts": [
+        {
+          "kind": "arch",
+          "title": "这门课的主线：一个任务管理系统，四种形态",
+          "body": "整本教程不是零散知识点，而是**同一个项目被反复改造**：先在一个 `main.py` 里把路由、参数、响应、依赖写通（地基），再拆成分层工程并接上数据库与登录（工程），最后补测试、打包镜像、上线（上线）。\n\n看每一章时抓住这条线就不会迷路：这段代码在哪个形态里、它解决了上一形态的什么麻烦。你现在看到的第 0 章例子，就是那个「最终形态」的缩略图——先认脸，后面每一章都是在放大其中一格。"
+        },
+        {
+          "kind": "base",
+          "title": "虚拟环境在解决什么，为什么别装全局",
+          "body": "Python 的包默认装进「当前解释器能看到的全局位置」，于是两台机器上两个项目想要不同版本的同一个库时就会打架，最坏情况是把系统自带工具链搞坏（macOS 上 `pip install` 到系统 python 会直接报 externally-managed-environment）。\n\n虚拟环境就是一个目录 + 一个软链解释器 + 一个自己的 `site-packages`。`python3 -m venv .venv` 建它，`source .venv/bin/activate` 把 shell 的 PATH 临时指过去（Windows 是 `.venv\\Scripts\\activate`），之后 `pip install` 只写进这个目录。规则很简单：**一个项目一个 `.venv`，永远不要装全局**。\n\n本站用 [uv](https://docs.astral.sh/uv/) 管这件事：`uv sync` 按 `uv.lock` 建 `.venv`，`uv run xxx` 自动在该环境里执行——多数情况下你连 activate 都不需要。"
+        },
+        {
+          "kind": "compare",
+          "title": "pip + venv 与 uv 的差别",
+          "body": "命令面基本对得上，差在「谁来保证可复现」：\n\n- `python3 -m venv .venv` + `pip install -r requirements.txt`：环境自己建，版本靠人写死；`pip freeze` 出来的清单里常混进间接依赖，换台机器结果不一定一样。\n- `uv venv` / `uv add fastapi` / `uv sync`：解释器、依赖解析、**锁文件**一起管。`uv.lock` 记录精确版本与哈希，`uv sync` 在任何机器上装出同一套；速度也快一个数量级。\n\n教程第 0 章用 pip 写（那是通用知识），第 1 章之后开始用 uv。本站工程用 uv，`pyproject.toml` 里还把索引配成了阿里云镜像，国内网络下 `uv sync` 不会卡在拉包上。"
+        },
+        {
+          "kind": "base",
+          "title": "为什么要求 Python 3.10+、推荐 3.12",
+          "body": "门槛是**类型注解的写法**决定的。FastAPI 的接口契约靠读注解工作，而现代写法 `coupon: str | None`、`items: list[OrderItem]` 里的 `X | Y` 只有 3.10+ 能在运行时被求值；3.9 上要么写 `Optional[str]`，要么整个应用启动时直接 `TypeError`。\n\n推荐 3.12 是因为它的报错信息明显更好（回溯会指到具体的表达式片段）、启动与 import 更快，而且 asyncio 的行为更稳定。教程里所有例子都在 3.12 上验证过。"
+        }
+      ]
+    }
+  },
+
+  "ch00ex01": {
+    "title": "缩略图：这个框架替你做了哪三件事",
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "先认脸，再学细节",
+        "body": "这 16 行是全站的目录：一个**模型**（校验 + 文档）、一个**路由装饰器**（把函数挂到 URL）、一个**异常**（把业务失败翻译成 HTTP 状态码）、一个**返回值**（自动序列化成 JSON）。后面 11 章每一章都是在放大其中一格；看不懂某章在干什么的时候，回到这块对照一下位置。"
+      }
+    ],
+    "line_notes": [
+      { "line": 1, "to": 2, "kind": "note", "text": "整个框架你只需要两个 import：fastapi 里的路由/异常/依赖工具，pydantic 里的模型基类与 Field。" },
+      { "line": 4, "kind": "key", "text": "app 是所有路由的注册中心，同时就是一个 ASGI 应用对象。它不负责监听端口，那是 uvicorn 的事。" },
+      { "line": 6, "to": 9, "kind": "key", "text": "RegisterIn 定义一次，就同时拿到三样东西：入参校验规则、编辑器/IDE 的类型提示、/docs 里的请求体 schema。这三样不会互相跑偏，因为它们是同一份声明的三个视角。" },
+      { "line": 8, "kind": "warn", "text": "min_length=8 只管长度，不管强度；更重要的是：这个字段是**明文口令**，只能当输入用，绝不能直接存库。第 8 章会把它换成 argon2/bcrypt 哈希。" },
+      { "line": 9, "kind": "note", "text": "写了默认值 None 就是可选字段。注意 `str | None` 这种联合写法需要 Python 3.10+，3.9 上要退成 Optional[str]。" },
+      { "line": 11, "to": 12, "kind": "key", "text": "路径里带版本号（/api/v1/...）不是 FastAPI 的要求，是工程习惯：等要换接口形态时，老客户端还能停在 v1。payload 参数的类型注解就是接口契约，函数拿到手已经是校验过的干净对象。" },
+      { "line": 15, "kind": "warn", "text": "业务失败用 HTTPException 表达，而不是 return 一个 {\"error\": ...} 的 200。邮箱重复是 409 Conflict，语义化状态码让调用方可以按码决策，也让 /docs 的错误说明写得出来。" },
+      { "line": 16, "kind": "note", "text": "返回 dict（或模型对象），FastAPI 负责序列化。想只暴露部分字段，给路由加 response_model——第 4 章整章在讲这件事。" }
+    ],
+    "api_cards": [
+      {
+        "name": "HTTPException",
+        "signature": "raise HTTPException(status_code=409, detail=\"email already exists\")",
+        "kind": "api",
+        "summary": "在端点里「抛出去」，由框架翻译成 HTTP 响应。detail 会进响应体的 detail 字段。",
+        "params": [{ "name": "status_code", "type": "int", "note": "必须显式给，默认是 500" }, { "name": "detail", "type": "str | Any", "note": "别把内部信息或堆栈塞进去" }, { "name": "headers", "type": "dict", "note": "例如 401 要带 WWW-Authenticate" }],
+        "returns": "不返回：它是个异常",
+        "gotcha": "只能在请求处理链路里用。在 lifespan、后台任务里 raise 它没人接，只会把任务弄崩。"
+      },
+      {
+        "name": "status_code 语义速记",
+        "signature": "201 创建 / 204 无内容 / 400 客户端错 / 401 未登录 / 403 无权限 / 404 找不到 / 409 冲突 / 422 校验失败 / 500 服务端错",
+        "kind": "concept",
+        "summary": "401 与 403 的区别最常被问：401 是「我不知道你是谁」，403 是「我知道你是谁但你不能干这个」。",
+        "params": [],
+        "returns": "调用方据此分支：422 提示改表单，401 去登录，403 提示权限不足",
+        "gotcha": "422 是 FastAPI 的默认校验错误码（不是 400），自定义校验失败时最好也保持这个约定，别把 422 当业务错误滥用。"
+      }
+    ]
+  },
+
+  "ch00ex02": {
+    "title": "装环境：一个项目一个 venv",
+    "concepts": [
+      {
+        "kind": "flow",
+        "title": "装完之后按这个顺序跑起来",
+        "body": "`venv` 建环境 → `activate` 让当前 shell 用它 → `pip install` 装包 → `fastapi dev app/main.py` 起服务 → 浏览器开 `http://127.0.0.1:8000/docs`。\n\n只有最后一步能看到东西，前面四步都在准备。新手最常见的卡点是「activate 没生效」（`which python3` 还指向系统路径）和「装的包不在当前 venv 里」，两条都靠 `which python3` + `python3 -m pip list` 现场确认。"
+      }
+    ],
+    "line_notes": [
+      { "line": 1, "kind": "note", "text": "3.10 是门槛（类型联合写法），3.12 更舒服（报错更好读、启动更快）。" },
+      { "line": 3, "kind": "key", "text": "每个项目一个 .venv，别装全局。装全局的坏处不是「脏」，是版本互相踩踏后你无法解释现象。" },
+      { "line": 4, "kind": "warn", "text": "activate 只对**当前这个终端窗口**有效，新开一个窗口要重新 source。判断有没有生效：`which python3` 应当落在项目目录里。" },
+      { "line": 6, "kind": "note", "text": "fastapi[standard] 这个 extra 把入门要用的东西一起带上：uvicorn、fastapi dev 命令行、常见校验与文档依赖，省掉「为什么没有 uvicorn 命令」这类坑。" },
+      { "line": 7, "kind": "note", "text": "SQLAlchemy 一定要 >=2.0：教程通篇是 2.0 的 `Mapped[]` 与 `select()` 写法，1.x 的查询 API 不兼容。httpx / pytest / pytest-asyncio 是第 10 章测试用的。" }
+    ],
+    "api_cards": [
+      {
+        "name": "python -m venv / uv venv",
+        "signature": "python3 -m venv .venv && source .venv/bin/activate   # 或 uv venv && uv sync",
+        "kind": "api",
+        "summary": "建一个项目私有环境。uv 还会顺手把解释器版本按 .python-version 装好。",
+        "params": [{ "name": ".venv", "type": "目录名", "note": "约定名，别改；.gitignore 里就是它" }],
+        "returns": "一个目录 + 一个可用的解释器",
+        "gotcha": "venv 目录**不可移动**，也别把它提交进 git（路径写死在脚本和 pyvenv.cfg 里，换机器就废）。重新 `uv sync` 比抢救它快。"
+      }
+    ]
+  },
+
+  "ch01ex04": {
+    "title": "async 的三种写法：卡住、挂起、交给线程池",
+    "concepts": [
+      {
+        "kind": "flow",
+        "title": "这四条路由各自发生了什么",
+        "body": "一个进程只有一个事件循环，它做的是「谁准备好了我就跑谁」的调度：\n\n- `/bad`：`time.sleep(3)` 是同步阻塞，循环被占死 3 秒，这期间**所有**请求都在排队，包括 `/good`。\n- `/good`：`await asyncio.sleep(3)` 让出控制权，循环立刻去接别的请求，3 秒后再回来。这是 async 的全部收益。\n- `/also-good`：写成普通 `def`，FastAPI 判定它是同步函数，丢进线程池执行，循环不受影响。默认线程池上限 40，所以它「不卡循环」但「会占线程」。\n- `/mixed-bug`：`async def` 里用同步的 `requests`，等于 `/bad` 的加强版——网络多慢，循环就卡多久，而且是你控制不了的时长。\n\n所以判断标准不是「哪个写法时髦」，而是「这段代码在等待时会不会把循环让出去」。"
+      }
+    ],
+    "line_notes": [
+      { "line": 6, "to": 9, "kind": "warn", "text": "反例：async def 里用 time.sleep。函数签名骗了框架（它以为你能让出控制权），实际一行都不让，整个服务被这一个请求拖住。" },
+      { "line": 11, "to": 14, "kind": "key", "text": "正例：await asyncio.sleep(3)。挂起的是这个协程，事件循环继续处理别的请求。await 的地方就是「我可以等，你去忙」。" },
+      { "line": 16, "to": 19, "kind": "key", "text": "同样合理的写法：普通 def。FastAPI 会自动把它放在线程池里跑，不阻塞循环。只有同步库（旧 SDK、读大文件、重计算）可用时，就别硬写 async——这也是官方建议。" },
+      { "line": 21, "to": 24, "kind": "warn", "text": "生产事故常见形状：async 端点里调 requests.get。要么换 httpx.AsyncClient + await，要么把整个端点写成 def。这里 requests 也没装，直接跑会 ModuleNotFoundError——正好说明依赖要显式声明。" }
+    ],
+    "api_cards": [
+      {
+        "name": "asyncio.sleep / time.sleep",
+        "signature": "await asyncio.sleep(3)   |   time.sleep(3)",
+        "kind": "api",
+        "summary": "前者让出事件循环，后者占住线程不动。名字都像「睡觉」，行为差别是整章的重点。",
+        "params": [],
+        "returns": "asyncio.sleep 返回 awaitable；time.sleep 无返回",
+        "gotcha": "同类混淆还有：asyncio.run 不能嵌套在已运行的循环里；阻塞版 subprocess/文件 I/O 同理，异步上下文里要用 anyio / asyncio 的对应版本。"
+      },
+      {
+        "name": "同步端点进线程池",
+        "signature": "@app.get('/x')\ndef handler(): ...",
+        "kind": "concept",
+        "summary": "FastAPI 检查你的函数是不是协程；不是就用 run_in_threadpool 调，避免拖住事件循环。",
+        "params": [{ "name": "线程池上限", "type": "默认 40", "note": "anyio 的默认值；高并发 CPU/IO 混合场景要显式调大或改异步" }],
+        "returns": "对外行为一致：都能正常返回响应",
+        "gotcha": "「同步函数被丢进线程池」不等于「线程安全」。连接池、全局可变状态仍要自己保证；也别在同步函数里 await 不了的东西硬等。"
+      }
+    ]
+  },
+
+  "ch01ex06": {
+    "title": "最小工程骨架：app 包 + tests",
+    "line_notes": [
+      { "line": 2, "kind": "note", "text": ".venv 只活在本地，永远不进 git（看仓库 .gitignore）。" },
+      { "line": 4, "kind": "warn", "text": "__init__.py 是「这个目录是个包」的声明。少了它，`uvicorn app.main:app` 这种「按模块路径导入」就会失败，或者更糟：某些工具能跑、某些不能，排查很久。空文件就行。" },
+      { "line": 5, "kind": "note", "text": "main.py 是装配处：建 app、挂路由、加中间件。第 6 章会把它从「什么都在里面」瘦成只做装配。" },
+      { "line": 6, "kind": "note", "text": "core/config.py 放配置。到这一步就已经是「一层目录一个职责」的雏形，别在 main.py 里 os.environ 到处取。" },
+      { "line": 7, "kind": "note", "text": "tests/ 与 app/ 平级，不在应用包里。pytest 从项目根发现它，这也是 `pythonpath = [\".\"]` 之类配置要留意的原因。" }
+    ],
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "为什么先定目录再写代码",
+        "body": "目录结构决定「谁能 import 谁」。app/ 里放业务，tests/ 放验证，core/ 放配置与公共件——这条线一旦定下来，第 7 章的分层（models / repositories / services / api）只是在这三格里继续细分。\n\n反例是「main.py 长到 1200 行再想办法」：那时每个函数都可能顺手摸一下全局配置，拆无可拆。本站自己的结构在 README 的「目录」一节，你可以拿它跟这个骨架对照着看。"
+      }
+    ]
+  },
+
+  "ch01ex07": {
+    "title": "起服务的两种方式：uvicorn 与 fastapi dev",
+    "line_notes": [
+      { "line": 1, "kind": "key", "text": "冒号左边「app.main」是能被导入的模块路径（app 包里的 main 模块），右边「app」是那个模块里的变量名。--reload 让改代码自动重启，需要 watchfiles（uvicorn[standard] 已带）。" },
+      { "line": 2, "kind": "note", "text": "fastapi dev 直接给文件路径，默认就带热重载，开发期更省心；生产还是用显式的 uvicorn 命令（可控 --host/--port/--workers）。" }
+    ],
+    "concepts": [
+      {
+        "kind": "base",
+        "title": "为什么「跑了但没反应」几乎都是 uvicorn 的事",
+        "body": "你的代码只创建一个 ASGI 应用对象，不监听端口。看不到效果时按这个顺序查：命令里模块路径对不对（app.main:app 而不是 app/main.py:app）、端口被占没有、是不是只在 127.0.0.1 上监听（容器里要 `--host 0.0.0.0`）、改代码没生效就是 `--reload` 没装 watchfiles。"
+      }
+    ],
+    "api_cards": [
+      {
+        "name": "uvicorn（命令行）",
+        "signature": "uvicorn app.main:app --reload --host 127.0.0.1 --port 8000",
+        "kind": "api",
+        "summary": "开发用 --reload；部署用 --workers N（多进程），两者不要同时用。",
+        "params": [{ "name": "--host", "type": "str", "note": "默认 127.0.0.1；0.0.0.0 会暴露给局域网" }, { "name": "--workers", "type": "int", "note": "多进程数，通常 CPU 核数附近" }],
+        "returns": "一个持续运行的服务进程",
+        "gotcha": "本站的 /api/run 会执行任意代码，所以**只监听 127.0.0.1**。把这类服务用 --host 0.0.0.0 推到局域网，等于给了别人一个你机器上的代码执行入口。"
+      }
+    ]
+  },
+
+  "ch01ex08": {
+    "title": "没有类型契约时，校验要一行行手写",
+    "line_notes": [
+      { "line": 1, "kind": "note", "text": "这是 Flask 风格的路由：装饰器只登记 URL 和方法，函数签名里没有任何输入信息。" },
+      { "line": 3, "kind": "warn", "text": "`request.get_json()` 拿到的是「可能为 None 的任意 dict」。从这里开始，每个字段都得自己判断存在与类型——这就是校验代码的来源。" },
+      { "line": 4, "kind": "note", "text": "必填：手动判空。每个端点抄一遍，抄漏一处就是一个 500。" },
+      { "line": 5, "kind": "warn", "text": "`int(data.get('count', 0))` 自己就会抛 ValueError（比如传了 \"abc\"），而这个异常通常没人接，最后客户端收到 500 + 服务器一堆堆栈。第 4 章讲怎么把它变成规矩的 422。" },
+      { "line": 6, "kind": "note", "text": "长度/格式约束继续手写。三个字段写完，函数的正事还没开始——这就是 20 行样板的由来。" },
+      { "line": 7, "kind": "key", "text": "真正的业务在哪里？还没开始。这类代码的问题不是长，是**校验规则只存在于过程里**：文档写不出来，测试要构造 HTTP 请求才能测，改一个字段要动 N 个端点。" }
+    ],
+    "concepts": [
+      {
+        "kind": "compare",
+        "title": "它要解决的具体三件事",
+        "body": "1. **重复**：同一段判空/转 int 出现在每个端点；\n2. **不可导出**：字段约束散在 if 里，没法自动生成文档和 schema；\n3. **错误语义糊**：非法输入到底回 400、500 还是自定义 JSON，全看当年谁写的。\n\n下一块代码（after.py）用一个模型同时解决这三条。看的时候抓住这一点：**FastAPI 省的不是打字，是「规则只写一次并且能被机器读」。**"
+      }
+    ]
+  },
+
+  "ch01ex09": {
+    "title": "类型即校验：一份模型管住入参",
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "这块代码和上一块的对应关系",
+        "body": "before.py 里那 20 行手写判断，在这里变成 4 行字段声明 + 1 个跨字段校验器。三处收益分别对应：约束跟着字段走（不重复）、/docs 自动出现必填/范围/长度（可导出）、非法输入由框架统一回 422 并给出定位（错误语义清晰）。\n\n注意端点函数体只剩两行——**校验发生在进函数之前**。这就是 FastAPI 的核心卖点，也是后面 `response_model`、依赖注入、数据库模型都要沿用同一份类型定义的原因。"
+      }
+    ],
+    "line_notes": [
+      { "line": 1, "kind": "warn", "text": "金额用 Decimal 不用 float。Decimal(\"0.1\") + Decimal(\"0.2\") 精确等于 0.3，float 会得到 0.30000000000000004——算钱时这是事故。传进来的 JSON 数字 Pydantic 会转成 Decimal。" },
+      { "line": 7, "to": 10, "kind": "key", "text": "行级约束全部声明在字段上：sku 非空且不超 32，count 必须 1..999，price 是 Decimal。这些规则同时服务于校验、文档和类型检查，一份声明三处用。" },
+      { "line": 12, "to": 15, "kind": "key", "text": "嵌套模型 + 容器约束：items 至少一个元素（min_length 对 list 有效），coupon 可选且最多 16 字符。请求体再深也能表达，这是手写 if 永远做不干净的部分。" },
+      { "line": 17, "to": 22, "kind": "key", "text": "跨字段/自定义规则放 field_validator。v2 里默认是 after 模式：拿到的 v 已经是 list[OrderItem]，元素都是干净的，可以直接算总额。抛 ValueError 会变成该字段的校验错误（最终 422）。" },
+      { "line": 24, "kind": "note", "text": "status_code=201 显式声明「创建成功」。别忘了写，否则创建类接口也回 200，语义上不对。" },
+      { "line": 25, "kind": "key", "text": "参数类型 OrderCreate 就够了：进来的 JSON 已被校验+转换；返回注解 dict[str, object] 只是给类型检查器看的提示，真正裁剪输出要靠 response_model。" },
+      { "line": 26, "kind": "note", "text": "业务代码里可以放心假设 payload 合法——这正是把校验前移的意义。order_service 是第 6 章的分层概念，这块代码单独跑会 NameError。" }
+    ],
+    "api_cards": [
+      {
+        "name": "field_validator",
+        "signature": "@field_validator(\"items\")\n@classmethod\ndef check(cls, v): ...",
+        "kind": "api",
+        "summary": "v2 里对单个（或多个）字段做自定义校验的入口。默认 mode=\"after\"，拿到的是已解析好的值。",
+        "params": [{ "name": "字段名", "type": "str", "note": "可以一次给多个字段名" }, { "name": "mode", "type": "\"before\" | \"after\"", "note": "before 在转换前跑，适合做「把空字符串当 None」这类归一化" }],
+        "returns": "校验后的值（要 return，否则字段变成 None）",
+        "gotcha": "忘了 return v 是最常见的坑。另外跨字段规则也可以用 model_validator(mode=\"after\")，它拿到整个模型，适合「开始日期 < 结束日期」这类。"
+      },
+      {
+        "name": "Decimal 作为模型字段",
+        "signature": "price: Decimal = Field(gt=0)",
+        "kind": "api",
+        "summary": "精确十进制数。JSON 里的 19.90 会变成 Decimal('19.90')，序列化回去也不会漂。",
+        "params": [{ "name": "gt / le", "type": "number", "note": "和 Decimal 比较时建议传 Decimal 或字符串，避免 float 精度干扰" }],
+        "returns": "Decimal 实例",
+        "gotcha": "Decimal 与 float 混算会报 TypeError 或悄悄丢精度；比较大小前确保两边类型一致。金额聚合优先用 Decimal，最后再格式化输出。"
+      }
+    ]
+  }
+}

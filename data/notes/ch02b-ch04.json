@@ -1,0 +1,385 @@
+{
+  "_chapters": {
+    "ch03": {
+      "concepts": [
+        {
+          "kind": "base",
+          "title": "三类参数的边界：谁负责什么",
+          "body": "分不清楚就用这条判据：\n\n- **路径参数**回答「你要哪一个资源」——它是资源身份的一部分，`/tasks/12` 和 `/tasks` 是两个不同的东西。它不该放筛选、分页、排序这些视图参数。\n- **查询参数**回答「你希望我怎么呈现」——`?page=2&size=20&sort=-created&q=bug`。同一份资源，不同视图，URL 里都能表达，也才好缓存和分享。\n- **请求体**回答「这个实体的内容是什么」——POST/PUT/PATCH 的载荷。GET 用 body 虽然技术上可以，但代理、缓存、客户端库支持都很差，别用。\n\n由此能推出两个常见判断：把 `sort`、`page` 塞进路径（`/tasks/page/2/sort/created`）会让 URL 组合爆炸；把 `task_id` 放进 body（`POST /delete` + `{id:1}`）会丢掉「这个 URL 指向哪个资源」的表达能力，也不符合幂等语义。"
+        },
+        {
+          "kind": "base",
+          "title": "列表接口必须有 size 上限，这不是建议",
+          "body": "`size: int = 20` 只是默认值，客户端可以传 `size=9999999`。没有 `le=100` 这类上限时，一次请求就能让你把整表读进内存：数据库被拖住、进程 OOM、下游被打穿，而且这是**公开可预测**的打法，等于给服务留了个自我 DoS 开关。\n\n一条 `Field(ge=1, le=100)` 就堵住了。要更多数据走游标分页或导出任务，不要靠放大 size。\n\n顺带两条同源的护栏：字符串查询参数给 `min_length`/`max_length`（防单字符全表模糊匹配），外键类参数给 `gt=0`（防 `?project_id=0` 变成「查全部」的意外语义）。"
+        },
+        {
+          "kind": "compare",
+          "title": "多个查询参数的三种组织方式",
+          "body": "同一个 `?page=2&size=50`，有三种写法，行为不一样：\n\n1. **逐字段 `Annotated[int, Query()]`**：最直白，参数一多函数签名就长；每个字段的约束单独声明，复用靠复制。\n2. **`Annotated[PageQuery, Query()]`（模型 + Query）**：字段集中、可复用、能带 validator；本站和第 3 章后面都走这条。\n3. **依赖函数返回模型**（`pg: Annotated[PageQuery, Depends(page_params)]`）：比第 2 种多一步，但能在构造函数里做「sort 字段合法性映射成 SQLAlchemy 排序键」这类逻辑，第 5 章会看到。\n\n还有一种最容易踩的：**光写 `p: PageQuery` 不加 `Query()`**。裸模型参数默认按**请求体**处理，GET 上就变成「请给我传 JSON body」，浏览器地址栏测试全 422——第 3 章第三个例子专门演这个坑。"
+        }
+      ]
+    },
+
+    "ch04": {
+      "concepts": [
+        {
+          "kind": "base",
+          "title": "response_model 到底替你挡了什么",
+          "body": "它做三件事，缺一个都会出事：\n\n1. **裁剪**：只输出模型里声明过的字段。ORM 对象上挂着 `password_hash`、`internal_note`、`session_token`，你没写进 `UserOut` 它就**不可能**出现在响应里——这是防泄漏最可靠的一道，因为它不依赖程序员每次记得 `del`\n2. **文档**：/docs 与 /openapi.json 里的响应 schema 由它生成，前端能据此生成类型。\n3. **稳定形状**：数据库列改名/加字段时，响应契约由模型定，不会因为多查了一列就把内部结构透出去。\n\n反面案例：直接 `return user`（ORM 对象）且没有 response_model，FastAPI 会尽力把对象转成 dict，字段列表等于「这个类上有什么」，某天加个 `_raw_token` 就跟着上公网了。"
+        },
+        {
+          "kind": "compare",
+          "title": "入参模型和出参模型必须分开",
+          "body": "一个模型走天下的冲动很强烈（字段不都一样吗），但两边要表达的从来不一样：\n\n- 入参不该有 `id`/`created_at`（由系统生成）。允许客户端传，就等于允许它伪造主键。\n- 出参不该有 `password`、`password_hash`、`role` 之类写入用/内部字段。\n- 入参常需要「可选更新」语义（PATCH 要能区分「没传」和「传了 null」），出参不需要。\n- 出参可能需要别名转换（camelCase）、格式化（Decimal→字符串），入参要的是严格解析。\n\n所以命名上就分开：`TaskCreate` / `TaskUpdate` / `TaskOut`。第 4 章的通用规则：**如果两个模型有 80% 相同，宁可写两遍**，或者用继承（`class TaskOut(TaskBase): id: int; created_at: ...`）把公共部分抽出来。"
+        },
+        {
+          "kind": "flow",
+          "title": "一个对象从 return 到网络字节的旅程",
+          "body": "`return user` 之后依次发生：\n\n1. FastAPI 看你声明的 `response_model`（或函数返回注解），确定输出契约；\n2. 用 `jsonable_encoder` 把 dict/list/dataclass/ORM/Decimal/datetime 之类转成 JSON 可表达的值；\n3. 按模型再校验+序列化一遍（这一步就是裁剪和转换发生的地点，`by_alias=True` 让字段别名生效）；\n4. 包成 `JSONResponse`，写 `Content-Type: application/json`；\n5. 中间件回程加自己的头（第 9 章的 X-Request-Id、耗时），最后交给 uvicorn 发出去。\n\n理解了这条链，就理解了几件事：为什么 204 必须显式返回 `Response`（第 3 步不该有 body）、为什么 `StreamingResponse`/`FileResponse` 会**跳过**模型序列化（你自己负责内容）、以及为什么状态码要在装饰器里声明而不是函数里改（`status_code` 同时决定文档和响应）。"
+        }
+      ]
+    }
+  },
+
+  "ch02ex02": {
+    "title": "起服务与验证：三种命令各自测什么",
+    "line_notes": [
+      { "line": 1, "kind": "note", "text": "fastapi dev 是开发入口：默认热重载、默认 8000 端口，给文件路径就行。" },
+      { "line": 2, "kind": "key", "text": "底层命令值得认识：冒号左边是可导入模块路径，右边是模块里的 app 变量；--port 换成 8000 之外的端口时，浏览器和 curl 也要跟着换。" },
+      { "line": 3, "kind": "note", "text": "curl 验证「服务侧」是否真的返回 JSON，`python3 -m json.tool` 只是把输出格式化。用 curl 而不是只看浏览器，能立刻区分「接口没返回」和「前端渲染问题」。" }
+    ]
+  },
+
+  "ch02ex03": {
+    "title": "健康检查：存活探针与就绪探针分开写",
+    "concepts": [
+      {
+        "kind": "flow",
+        "title": "liveness 与 readiness 为什么必须是两个端点",
+        "body": "两者回答的问题不同，处置动作也不同：\n\n- **存活（/healthz）**：「这个进程还活着吗？」只能回答「我能不能响应 HTTP」。它**不能**依赖数据库——否则数据库抖一下，所有实例都返回非 200，编排系统把它们全部重启，故障被放大成雪崩。这里就是 `200 + uptime`。\n- **就绪（/readyz）**：「现在能把流量给它吗？」该检查外部依赖（DB、缓存、下游）。失败返回 503，负载均衡把这个实例摘掉，等它恢复再挂回去，不重启进程。\n\n第 2 章这个例子已经把两条线画对了：healthz 不碰 DB，readyz 碰。第 7 章会把 `db_reachable()` 换成真实的 `SELECT 1`。"
+      }
+    ],
+    "line_notes": [
+      { "line": 5, "kind": "note", "text": "进程启动时刻记在模块级变量里，uptime 就是差值。注意它在 reload 时会重置，这不是 bug：热重载等于新进程。" },
+      { "line": 8, "kind": "note", "text": "version 从环境变量 GIT_SHA 取，部署流水线注入；本地没有就是 \"dev\"。这样线上出问题第一句话就能问「你跑的是哪个 commit」。" },
+      { "line": 9, "kind": "warn", "text": "生产按需关文档（docs_url=None）。但要清楚：/docs 不是攻击面本身，真正的防护是鉴权与网络隔离；关掉它只是减少暴露的信息量。" },
+      { "line": "13", "to": 16, "kind": "note", "text": "Health 模型给出响应契约：字段类型稳定，监控抓取时不会因为某天多/少一个字段就解析失败。" },
+      { "line": 18, "kind": "key", "text": "tags=[\"ops\"] 会把这两条路由归到文档里独立的分组，和业务接口分开——运维端点和业务端点混在一起时，/docs 会难读得多。" },
+      { "line": 20, "kind": "key", "text": "函数里的 docstring 会直接成为 /docs 中这条接口的描述。写成「别在这里查数据库」这种祈使句，比写在 wiki 里更有效，因为改代码的人一定看得到。" },
+      { "line": 23, "to": 29, "kind": "warn", "text": "readiness 这里没写 response_model，直接返回 dict，同时用注入的 Response 对象手动改状态码。可行，但注意：只要声明了 response_model，返回 503 那份 {\"status\": \"degraded\"} 也得符合契约，否则 503 会变成 500。" },
+      { "line": 31, "to": 32, "kind": "note", "text": "占位函数。第 7 章换成真实探测：短超时 + 只读 + 失败即 False，别在这里做重活。" }
+    ],
+    "api_cards": [
+      {
+        "name": "Response（作为参数注入）",
+        "signature": "async def endpoint(res: Response): res.status_code = 503",
+        "kind": "api",
+        "summary": "在端点里改状态码、加响应头，同时保留正常返回值的序列化。",
+        "params": [],
+        "returns": "None（函数照常 return 数据）",
+        "gotcha": "只在「主状态码可变」时用。要返回完全不同的媒体类型或空 body，直接 return Response/JSONResponse 实例。"
+      },
+      {
+        "name": "FastAPI 构造参数",
+        "signature": "FastAPI(title, version, docs_url, redoc_url, openapi_url, lifespan)",
+        "kind": "api",
+        "summary": "这一层就是站点的元信息开关：title/version 出现在文档，docs_url=None 可关掉界面。",
+        "params": [{ "name": "docs_url / redoc_url", "type": "str | None", "note": "两套文档界面，通常只留一套或都关" }, { "name": "openapi_url", "type": "str", "note": "关掉它 /docs 也就没意义了" }],
+        "returns": "ASGI 应用对象",
+        "gotcha": "这里没有 host/port 参数——监听地址属于 uvicorn 的职责，不要试图在代码里配端口。"
+      }
+    ]
+  },
+
+  "ch03ex01": {
+    "title": "路径参数与查询参数：约束都写在注解里",
+    "line_notes": [
+      { "line": 4, "kind": "note", "text": "APIRouter 带 prefix 与 tags：路由函数里只写 `/{task_id}`，最终 URL 是 /tasks/{task_id}，文档里自动归到 tasks 组。" },
+      { "line": "6", "to": 10, "kind": "key", "text": "GET /tasks/{task_id}。task_id 用 Annotated[int, Path(ge=1)]：类型负责转换（\"12\"→12），Path 负责校验和文档描述。`with_detail: Annotated[bool, Query()] = False` 读的是 ?with_detail=true——有默认值就是可选参数。" },
+      { "line": 10, "kind": "note", "text": "结尾的 `...`（Ellipsis）是合法函数体，表示「此处省略实现」。教程用它的地方都是片段，单独跑必然 NameError——这也正是徽章写「片段：依赖上文」的原因。" },
+      { "line": 12, "kind": "warn", "text": "@router.get(\"\") 表示路径就是 prefix 本身（/tasks），不是 /tasks/。想同时兼容带斜杠的写法要么两条路由，要么明确统一一处，别指望自动等价。" },
+      { "line": 14, "kind": "key", "text": "Literal[\"open\",\"doing\",\"done\"] 是枚举：非法值直接 422，而且 /docs 里会渲染成下拉框。省掉「传了个 donee 于是查出空列表」这类幽灵 bug。" },
+      { "line": 16, "kind": "warn", "text": "le=100 这个上限必须有。size 只给默认值不给上限，等于把「一次拉全表」的能力公开给任何调用方。" },
+      { "line": 17, "kind": "note", "text": "`str | None = None` 是可选查询参数；min_length=2 避免单字符模糊搜索把索引打空。" }
+    ],
+    "api_cards": [
+      {
+        "name": "Path / Query",
+        "signature": "Annotated[int, Path(ge=1, description=\"...\")] / Annotated[int, Query(le=100)]",
+        "kind": "api",
+        "summary": "为路径参数、查询参数附加校验与文档元数据。不写 Path/Query 也能跑，但会丢掉约束和文档描述。",
+        "params": [{ "name": "ge / gt / le / lt", "type": "number", "note": "数字范围；min_length/max_length/pattern 用于字符串" }, { "name": "default", "type": "Any", "note": "给默认值即选填，别把默认值同时写进 Field 和函数签名" }],
+        "returns": "一个带元数据的声明对象",
+        "gotcha": "布尔查询参数 ?flag=1 / true / on 都会被转成 True，但 ?flag（不带值）在部分客户端下会解析失败；前端最好始终写 `=true`。"
+      }
+    ]
+  },
+
+  "ch03ex02": {
+    "title": "请求体：模型字段 + 单个额外字段",
+    "line_notes": [
+      { "line": 7, "to": 11, "kind": "key", "text": "Feedback 是请求体契约：title 长度受限、email 必填、severity 是枚举（默认 low）、tags 是字符串列表。整个 JSON 对象会被解析成这个模型，端点里拿到的就是干净对象。" },
+      { "line": 9, "kind": "warn", "text": "注释提到 EmailStr：它需要额外装 email-validator，否则模型定义阶段就报错（pydantic 找不到类型）。别在没装依赖的项目里抄这行。" },
+      { "line": 11, "kind": "key", "text": "list 字段的默认值必须用 default_factory=list。写成 `tags: list[str] = []` 在 Pydantic 里安全（它会拷贝），但在普通函数默认值/dataclass 里是经典可变默认值陷阱——统一用工厂函数最省心。" },
+      { "line": 13, "to": 16, "kind": "key", "text": "归一化放进 field_validator：去空、转小写、去重、排序。放在这里的好处是所有端点共用同一份规则，业务代码拿到的一定是规范后的集合，比较和存储都不用再处理。" },
+      { "line": 19, "kind": "note", "text": "模型之外再要一个单独的 body 字段：用 Annotated[bool, Body()] = False。此时 JSON 是一个扁平对象——模型字段和 notify 同级。想把模型嵌一层用 Body(embed=True)。" },
+      { "line": 18, "kind": "note", "text": "status_code=201：创建类接口显式声明，配合第 4 章可以再加 Location 头。" }
+    ],
+    "concepts": [
+      {
+        "kind": "compare",
+        "title": "什么时候用模型，什么时候用 Body() 单字段",
+        "body": "默认走模型：契约集中、可复用、能挂 validator。\n\n只有这几种情况考虑单字段 Body：\n\n- 一个已有大模型里只更新两个字段（PATCH 的局部更新，且你不想再造一个模型）；\n- 布尔开关、幂等键这类「不属于实体」的控制字段（如 `notify`、`dry_run`）；\n- 接口是动作型（/orders/{id}/cancel?reason=...）。\n\n反例是把所有东西都摊成单字段 Body：约束、复用、跨字段校验全丢了，等于回到第 1 章那个手写 20 行校验的世界。"
+      }
+    ],
+    "api_cards": [
+      {
+        "name": "Body",
+        "signature": "Annotated[bool, Body()] / Annotated[Item, Body(embed=True)] / Body(..., media_type=\"multipart/form-data\")",
+        "kind": "api",
+        "summary": "声明「这个参数从请求体取」，并可附加 embed、媒体类型等信息。",
+        "params": [{ "name": "embed", "type": "bool", "note": "True 时该参数在 JSON 里包一层自己的键" }, { "name": "media_type", "type": "str", "note": "一般不用手填，FastAPI 按 Content-Type 自动判" }],
+        "returns": "带元数据的声明对象",
+        "gotcha": "同时声明多个模型参数又不 embed，会得到「期待嵌套对象」的意外 schema——这是 422 里最难读的一类。"
+      }
+    ]
+  },
+
+  "ch03ex03": {
+    "title": "同一个模型，加不加 Query() 行为完全不同",
+    "line_notes": [
+      { "line": "1", "to": 3, "kind": "note", "text": "一个普通分页模型，字段带默认值和范围约束，看起来哪儿都能用。" },
+      { "line": "5", "to": 7, "kind": "warn", "text": "反例：`p: Pagination` 裸着写。FastAPI 看到 Pydantic 模型参数，默认按**请求体**处理——于是这个 GET 接口开始要求 JSON body，浏览器地址栏访问直接 422，而文档里会显示一个「要传 body 的 GET」。" },
+      { "line": "9", "to": 11, "kind": "key", "text": "正例：`Annotated[Pagination, Query()]`。声明来源是查询串，于是 ?page=2&size=50 正常填充模型，字段级约束（size<=100）依然生效，文档里也终于是一排查询参数。" }
+    ],
+    "concepts": [
+      {
+        "kind": "base",
+        "title": "模型本身不决定来源",
+        "body": "决定「参数从哪来」的是**注解里的来源声明**：路径 `{...}` + Path、Query、Body、Form、Cookie、Header；模型 + Query 走查询串，裸模型走 body，Depends 走依赖。\n\n这也是 FastAPI 最值得先建立的一张心智地图：**类型说「是什么」，来源说「从哪来」，校验器说「必须满足什么」**，三件事各自独立声明。第 3 章的「参数三件套」讲的就是中间那格的六种取法。"
+      }
+    ]
+  },
+
+  "ch03ex04": {
+    "title": "文件上传：白名单、分块读、大小上限",
+    "concepts": [
+      {
+        "kind": "flow",
+        "title": "一个安全的上传接口要过几道检查",
+        "body": "1. **进门检查**：content_type 在不在白名单？超过声明大小就 413/415 拒掉。这只是第一道，因为 content_type 和 filename 都是客户端自报的，可以随便写。\n2. **边读边限**：不要 `await file.read()` 一次性读完（那叫读进内存），用分块循环 + 累计长度判断，超线立刻中断，恶意大文件不会先把内存吃满。\n3. **落地前二次确认**：读文件头几个字节做 magic bytes 嗅探（PNG 头是固定签名），确认内容确实是声称的类型；然后**重新生成文件名**（UUID + 白名单后的扩展名），绝不使用用户给的名字——原始名里可以有 `../../`、控制字符、`.html`、`.php`。\n4. **存储隔离**：头像这类公开展示的文件放对象存储并用独立域名，避免和主站同源导致上传型 XSS 生效。执行类扩展名一律不进可执行目录。\n\n这个例子做到了前两道，注释里也点明了后两道。"
+      }
+    ],
+    "line_notes": [
+      { "line": 5, "to": 6, "kind": "key", "text": "两道闸先声明成常量：类型白名单 + 5MB 上限。写死在函数里也能跑，但评审时看不出这是安全策略，改起来也没人记得两处一起改。" },
+      { "line": 10, "kind": "note", "text": "带文件上传就一定有 Form 字段，这需要 python-multipart。没装时 FastAPI 在导入阶段就抛清晰错误——本站第一次遇到这个就是在这一章，装上即可。" },
+      { "line": 11, "kind": "key", "text": "UploadFile 是流式的（SpooledTemporaryFile），大文件不会整个进内存。小文件也可以用 `file: bytes = File()`，但那是一次性读完，两者别混用。" },
+      { "line": 13, "to": 14, "kind": "note", "text": "415 Unsupported Media Type 比 400 更准确，调用方能区分「类型不对」和「参数缺失」。detail 里回显对端声明的类型，排查很省事。" },
+      { "line": 15, "to": 19, "kind": "key", "text": "分块 1MB 读、边读边累加、超限就 413。关键是「超限立刻中断」：攻击者传 10GB 时你只读了 5MB 多一点就拒绝了，而不是先读满内存。" },
+      { "line": 20, "to": 21, "kind": "warn", "text": "注释说清了生产环境还差的两步：内容嗅探 + 重新命名。filename 只适合用来记日志，绝不能参与落盘路径拼接。" },
+      { "line": 22, "kind": "note", "text": "返回体里只回 filename 和 size，别把服务端绝对路径回出去。" }
+    ],
+    "api_cards": [
+      {
+        "name": "UploadFile",
+        "signature": "await file.read(n) / file.write(...) / await file.seek(0) / file.content_type / file.spool",
+        "kind": "api",
+        "summary": "异步、流式、超阈值自动落临时文件的上传对象。",
+        "params": [{ "name": "max_part_size / size_threshold", "type": "参数", "note": "由 File(size=...) 控制内存阈值" }],
+        "returns": "读取到的 bytes 或 None",
+        "gotcha": "FastAPI 处理完请求会关闭并清理临时文件。要在响应之后再读（后台任务里），必须在端点内先把内容拷到自己可控的位置。"
+      }
+    ]
+  },
+
+  "ch03ex05": {
+    "title": "查询模型 + 排序 + 关键字检索：一段真实列表接口",
+    "line_notes": [
+      { "line": "6", "to": 9, "kind": "key", "text": "PageQuery 把「一页请求」的所有可选项收在一处：page/size 带范围，sort 用 Literal 限定在四个值里（- 前缀表示倒序）。这样非法排序字段在进业务前就被 422 挡住。" },
+      { "line": 13, "kind": "note", "text": "Annotated[PageQuery, Query()] 让模型从查询串取值——和第三个例子那条坑正好对上。" },
+      { "line": 14, "to": 15, "kind": "note", "text": "可选过滤条件用 `| None = None`：没传就是 None，代码里 `if keyword:` 才加 where。避免用空字符串当「不过滤」的隐式约定。" },
+      { "line": 17, "kind": "key", "text": "sort 白名单在这里兑现成真正的排序键。注意顺序：先有可信集合（Literal），才有 `startswith(\"-\")` 的解析。如果 sort 是任意字符串直接拼进 order_by，那就是 SQL 注入入口。" },
+      { "line": 18, "kind": "note", "text": "软删除过滤写在最外层。这类「每个查询都要记得加」的条件，第 7 章会用 ORM 的全局过滤或默认仓储方法收口——靠人记一定会有漏。" },
+      { "line": 20, "to": 21, "kind": "note", "text": "project_id 用 `if project_id:` 判空有个隐含前提：0 不是合法 id（前面 Query(gt=0) 已经保证了），否则这里会把 0 当成「不过滤」。约束和判断要配套看。" },
+      { "line": 22, "to": 25, "kind": "warn", "text": "LIKE 的通配符必须转义。用户输入 `%` 不转义就是全表模糊匹配（慢查询 + 索引失效），输入 `_` 能悄悄改写匹配形状。先转义反斜杠本身，再转 % 和 _，顺序反了会把刚加的反斜杠再转一遍。" },
+      { "line": 27, "to": 28, "kind": "key", "text": "先算 total 再加 order_by/offset/limit：count 查询不需要排序，带着 order_by 去 count 在部分数据库上是白付的成本。两条查询共用同一个 where 条件，总数和列表才不会对不上。" },
+      { "line": 29, "kind": "note", "text": "Page.of 把 rows/total/pg 组装成统一分页壳（第 4 章有它的泛型定义），前端拿到的形状永远是 items/total/page/size/pages。" }
+    ],
+    "concepts": [
+      {
+        "kind": "flow",
+        "title": "列表接口的一条常规处理链",
+        "body": "解析并校验查询参数（模型 + Query）→ 组装基础 select（带软删除等恒定条件）→ 按需追加 where → 单独 count → 追加 order_by / offset / limit → 取行 → 用统一分页壳返回。\n\n两个容易忽略的点：其一，count 和取行必须用**同一份过滤条件**，否则会出现「total=0 但 items 有 20 条」；其二，offset 分页在深页时会退化（扫过前 N 行），数据量大要换游标分页（`created_at < 上一页最后一条` + limit）。"
+      }
+    ],
+    "api_cards": [
+      {
+        "name": "ilike + escape",
+        "signature": "col.ilike(f\"%{safe}%\", escape=\"\\\\\")",
+        "kind": "api",
+        "summary": "不区分大小写的模糊匹配；escape 指定转义符，让 \\% 表示字面百分号。",
+        "params": [{ "name": "escape", "type": "str", "note": "只写 escape 不手工转义是没用的——转义动作得你自己做" }],
+        "returns": "SQLAlchemy 布尔表达式，可继续 .where()",
+        "gotcha": "前缀 `%` 的模糊匹配用不上普通索引。真需要全文检索，上数据库的全文索引/独立检索服务，而不是加大 size。"
+      }
+    ]
+  },
+
+  "ch04ex01": {
+    "title": "出参契约：没声明的字段不可能泄漏",
+    "line_notes": [
+      { "line": 6, "kind": "key", "text": "from_attributes=True 允许模型直接从对象属性取值（ORM 实例、NamedTuple 都行），于是可以直接 `return user` 而不用手写 dict 转换。这里写成 dict 字面量能用，但推荐 `ConfigDict(from_attributes=True)`，有类型检查和自动补全。" },
+      { "line": "7", "to": 10, "kind": "key", "text": "只声明该给外部看的三个字段。UserOut 里没有 password_hash——它不是「记得别输出」，而是**结构上输出不了**，这类由模型保证的约束比靠人自觉可靠得多。" },
+      { "line": 12, "kind": "note", "text": "response_model=UserOut 同时决定序列化裁剪与 /docs 里的响应 schema。" },
+      { "line": 14, "to": 15, "kind": "warn", "text": "repo.get 返回的是 ORM 对象（挂着一堆列和关系），这里直接 return 它。裁剪发生在 FastAPI 用 UserOut 校验的那一步，所以安全；但要清楚代价：对象已经查出来了，`select` 里多取的列并没有省掉——省的是带宽和泄漏风险，不是数据库负载。" }
+    ],
+    "concepts": [
+      {
+        "kind": "arch",
+        "title": "ORM 对象与出参模型的关系",
+        "body": "常见三种做法：\n\n1. **直接 return ORM 对象 + response_model**（本例）：最省事，依赖 from_attributes。要注意别把关系属性牵连出一串查询（lazy 加载在异步下会直接抛 MissingGreenlet，第 7 章细讲）。\n2. **显式转换 `UserOut.model_validate(user)`**：在业务层就把形状定死，端点只是 return 一个模型。可测试性更好。\n3. **仓储层只查需要的列，返回 dict / row**：性能可控但代码啰嗦，列表类接口常用。\n\n关键是别把 ORM 对象当 DTO 到处传：那样「这个接口能返回什么」就变成了「这个类上有什么」。"
+      }
+    ],
+    "api_cards": [
+      {
+        "name": "ConfigDict",
+        "signature": "model_config = ConfigDict(from_attributes=True, strict=True, populate_by_name=True)",
+        "kind": "api",
+        "summary": "v2 的模型级配置入口（替代 v1 的 class Config）。本站第 6 章的配置模型也用它。",
+        "params": [{ "name": "from_attributes", "type": "bool", "note": "允许从对象属性验证；出参模型几乎都要开" }, { "name": "str_strip_whitespace", "type": "bool", "note": "顺手去掉首尾空格，省一个 validator" }],
+        "returns": "模型配置对象",
+        "gotcha": "ORM 对象上有未声明的字段不会报错，只是被丢掉；反过来模型声明了而对象上没有，就是校验错误——加字段时两边要一起改。"
+      }
+    ]
+  },
+
+  "ch04ex02": {
+    "title": "字段别名：后端 snake_case，前端 camelCase",
+    "line_notes": [
+      { "line": 3, "to": 5, "kind": "note", "text": "一个纯函数做命名转换：created_at → createdAt。自己写而不是引第三方库，是为了行为可见（下划线分段、首段不大写）。" },
+      { "line": 9, "kind": "key", "text": "alias_generator 给每个字段生成别名；populate_by_name=True 让**构造时**仍可用原字段名（否则 Python 代码里要写 createdAt=... 才能填值）。这是两边都留门的关键开关。" },
+      { "line": 11, "kind": "note", "text": "字段名保持 snake_case，Python 世界内部零改动；FastAPI 序列化响应时按别名输出（by_alias=True 是默认行为），所以 JSON 里是 createdAt。" },
+      { "line": 12, "kind": "warn", "text": "serialization_alias 只改「输出」的键名，输入仍按 alias/字段名接受。需要「入参叫 a、出参叫 b」这种不对称时才用，别把它当 alias 用。" }
+    ],
+    "concepts": [
+      {
+        "kind": "compare",
+        "title": "命名风格的分歧该在哪一层解决",
+        "body": "三条路：改数据库列名为 camelCase（Python 读起来别扭，SQL 里要加引号，直接否）；把 Python 字段写成 camelCase（违反 PEP8，内部代码风格分裂）；在**边界层**做别名转换（本例）。\n\n边界层转换的好处是各语言/生态都用自己的习惯：Python 里 snake_case，前端 TypeScript 里 camelCase，OpenAPI schema 自动是 camelCase（因为 alias 会进 schema），生成的客户端类型自然就是前端想要的样子。\n\n注意别名生效后，手工 `model_dump()` 默认仍输出字段名，要 `by_alias=True`；写单元测试断言 JSON 键名时最容易踩这一下。"
+      }
+    ],
+    "api_cards": [
+      {
+        "name": "alias_generator",
+        "signature": "ConfigDict(alias_generator=to_camel, populate_by_name=True, alias_prefix=\"data\")",
+        "kind": "api",
+        "summary": "批量生成字段别名，可配 alias_prefix 统一包一层键。",
+        "params": [{ "name": "alias_generator", "type": "Callable[[str], str] | AliasGenerator", "note": "v2 也接受分开指定 validation_alias / serialization_alias 的生成器" }],
+        "returns": "带别名的字段 schema",
+        "gotcha": "开了它之后，请求 JSON 用 snake_case 传会 422（除非 populate_by_name=True）。前后端联调时先确认这一点。"
+      }
+    ]
+  },
+
+  "ch04ex03": {
+    "title": "不返回 JSON 的四种情况：204、CSV、文件、带 Location 的 201",
+    "line_notes": [
+      { "line": "4", "to": 7, "kind": "key", "text": "DELETE 返回 204 No Content 必须显式 return Response(status_code=204)。204 按 HTTP 定义不能带 body；如果你 return dict，FastAPI 仍会序列化出 body，形成「204 带内容」的非法响应，某些客户端会直接报错。" },
+      { "line": 11, "to": 13, "kind": "key", "text": "导出用 StreamingResponse 传**生成器**：边生成边发，10 万行不会先在内存里拼一个大字符串。Content-Disposition 决定浏览器下载文件名；这里没设 size，chunked 传输。" },
+      { "line": 15, "to": 17, "kind": "note", "text": "静态文件交给 FileResponse，它负责正确的 Content-Type、Content-Length、Last-Modified 与流式发送，还会处理 HEAD/条件请求。response_class 只是让文档显示这个接口返回文件而不是 JSON。" },
+      { "line": 17, "kind": "warn", "text": "fid 是 int 所以没有拼接风险；但任何把用户输入放进路径的写法都要警惕目录穿越（`../../etc/passwd`）。文件路径必须来自白名单映射或安全生成的文件名。" },
+      { "line": 19, "to": 21, "kind": "note", "text": "创建接口用注入的 res 补一个 Location 头指向新资源，是 REST 规范里 201 的标配（本例注释留了这一步）。" }
+    ],
+    "concepts": [
+      {
+        "kind": "flow",
+        "title": "什么时候该绕开默认 JSON 序列化",
+        "body": "返回 Response / StreamingResponse / FileResponse 时，**你返回的对象不再经过 response_model 校验和裁剪**——FastAPI 直接把它发给客户端。也就是说：模型不再保护你，状态码、Content-Type、文件名、编码都得自己拿准。\n\n判断标准很简单：响应是「数据」就用模型；是「文件流」就用 File/Streaming；是「没有内容」就用 Response(204)。三种都不要顺手 return dict。"
+      }
+    ],
+    "api_cards": [
+      {
+        "name": "StreamingResponse",
+        "signature": "StreamingResponse(iterable_or_async_gen, media_type=..., headers=...)",
+        "kind": "api",
+        "summary": "分块发送：生成器每产出一块就发一块。适合导出、SSE、逐段计算的结果。",
+        "params": [{ "name": "content", "type": "iterable[str] | AsyncIterable", "note": "同步生成器会被放到线程池驱动；纯异步源用 async 生成器更好" }, { "name": "background", "type": "BackgroundTask", "note": "响应发完后要做的收尾（第 9 章）" }],
+        "returns": "流式 HTTP 响应",
+        "gotcha": "一旦开始发就不能改状态码：中途异常只能断流或把错误编码进内容里。所以校验、鉴权要在返回 StreamingResponse 之前完成。"
+      },
+      {
+        "name": "FileResponse",
+        "signature": "FileResponse(path, filename=..., media_type=..., background=...)",
+        "kind": "api",
+        "summary": "下载文件。filename 会设置 Content-Disposition；不传 media_type 时按文件名猜。",
+        "params": [{ "name": "path", "type": "str | Path", "note": "必须是服务端可信路径" }, { "name": "stat_result", "type": "StatResult", "note": "对象存储等无真实路径的场景可自己给，配合自定义处理" }],
+        "returns": "文件响应",
+        "gotcha": "大文件下载建议交给反向代理或对象存储的签名 URL，不要让应用进程长时间占着 worker 传字节。"
+      }
+    ]
+  },
+
+  "ch04ex04": {
+    "title": "泛型分页壳：Page[T] 让每个列表接口都能描述自己的 items",
+    "line_notes": [
+      { "line": "4", "to": 11, "kind": "key", "text": "Pydantic v2 支持 `BaseModel, Generic[T]`。items 元素类型由使用方填：Page[TaskOut]、Page[UserOut]。这样文档能精确到「items 里每项长什么样」，而不是笼统的对象数组。" },
+      { "line": 11, "kind": "note", "text": "pages 是算出来的（还有多少页）。返回 total 而不返回 pages 也是一种设计，但前端做分页控件时算起来麻烦，不如后端统一给。" },
+      { "line": 13, "to": 16, "kind": "key", "text": "类方法构造器把「怎么算总页数」集中在一处：`-(-total // size)` 是整数向上取整的惯用写法（先取负整除再取负），避免 math.ceil 引入浮点。max(1, ...) 保证空结果时 pages=0 不会变成奇怪的 0 页。" },
+      { "line": 16, "kind": "warn", "text": "pg.size 为 0 会 ZeroDivisionError。这里的保险来自上游 `Field(ge=1)`——契约成立是因为约束在别处声明过。这类跨模块依赖值得写进注释或测试。" }
+    ],
+    "concepts": [
+      {
+        "kind": "base",
+        "title": "为什么要给包装结构做泛型",
+        "body": "如果只写 `items: list[dict]` 或不用 response_model，文档和前端类型都会退化成「一堆未知」。泛型壳的成本是一个 TypeVar 和一次方括号，换来的是：\n\n- OpenAPI schema 里 items 的字段列表是真实的；\n- 裁剪/别名/日期格式对**每一项**都生效（外层模型会递归调用内层模型的序列化）；\n- 换资源类型不用复制一套分页结构。\n\n同理还有 Result[T]（统一响应体，第 9 章会见到）、Choices[T]（选项列表）。写第二次重复的包装模型时，就该抽泛型了。"
+      }
+    ]
+  },
+
+  "ch04ex05": {
+    "title": "泛型壳用起来：response_model 与返回注解写了两遍",
+    "line_notes": [
+      { "line": 1, "kind": "key", "text": "response_model=Page[TaskOut] 决定输出契约与文档。这是列表接口最理想的形状：既有分页元信息，又明确 items 元素类型。" },
+      { "line": 2, "kind": "warn", "text": "同一份 Page[TaskOut] 又写在返回注解里。FastAPI 从 0.89 起可以只靠返回注解推断契约，两处都写不会错，但等于同一件事声明两遍——改一处忘改另一处就是隐藏分歧。选一种风格全站统一：本仓库 app/schemas.py 用的是「只写返回注解 + response_model 省略」的思路。" },
+      { "line": 3, "to": 4, "kind": "note", "text": "repo.page 一次给出 rows 与 total（同一份 where 条件），Page.of 组装。端点里没有一行序列化代码，这正是出参契约该有的样子。" }
+    ]
+  },
+
+  "ch04ex06": {
+    "title": "detail 可以是结构：给机器读的错误码",
+    "line_notes": [
+      { "line": 5, "to": 6, "kind": "note", "text": "「资源不存在」用 None 判定，而不是靠仓储抛异常——第 7 章会把两种风格对比一次。这里的关键是：查不到是一种**正常结果**，值得显式分支。" },
+      { "line": "7", "to": 11, "kind": "key", "text": "detail 接受任意可序列化结构。放 code（TASK_NOT_FOUND）+ message（给人看），前端按 code 分支处理，不用去匹配自然语言文案——文案会改，码不会。" },
+      { "line": 11, "kind": "note", "text": "headers 里带一个追踪 id，用户截图报错时客服能直接对着日志搜。这就是第 9 章中间件要做的事的手工版，区别是中间件对所有响应统一加。" },
+      { "line": 13, "kind": "warn", "text": "没有 response_model 的接口直接 return ORM 对象，输出形状等于「这个对象上有什么」。给这个端点也配一个 TaskOut 才安全——第 1 个例子讲的就是这件事。" }
+    ],
+    "concepts": [
+      {
+        "kind": "compare",
+        "title": "错误响应体：字符串 detail 还是结构化",
+        "body": "内置行为是 `{\"detail\": \"...\"}`。用字符串还是对象，取决于调用方要不要分支：\n\n- 只有人要读 → 字符串；\n- 程序要据此处理（余额不足、任务已归档、需要二次确认）→ `{code, message}` 结构，且**把 code 定义成共享的枚举/常量**，别在端点里手写字符串——两处拼写不同就白做了。\n\n再往上是统一响应体：`{\"ok\": false, \"error\": {code, message, trace_id}, \"data\": null}`，全站所有响应同一形状。它不适合用「每个端点 raise」来实现，正确做法是自定义异常类 + 全局 exception handler（第 9 章），业务代码抛领域异常，HTTP 形状由一处翻译。"
+      }
+    ]
+  },
+
+  "ch04ex07": {
+    "title": "把错误也写进契约：summary / description / responses",
+    "line_notes": [
+      { "line": 3, "kind": "note", "text": "response_model 描述成功时的形状（201 + TaskOut）。" },
+      { "line": "5", "to": 6, "kind": "key", "text": "summary 是 /docs 列表里那一行，description 是点开的详细说明。「同一用户下标题重复会返回 409」这种约定必须写出来，否则前端只能靠猜和试。文档不是可选项，它是接口的一部分。" },
+      { "line": "7", "to": 10, "kind": "warn", "text": "responses 参数登记额外状态码及其 schema。要清楚它的边界：**只影响文档和 OpenAPI schema，不会真的把 409 的响应体变成 ErrorDetail 的样子**。实际返回什么由你 raise 的 HTTPException / 全局 handler 决定，两处必须自己保持一致。" },
+      { "line": 9, "kind": "note", "text": "422 通常不用自己写：FastAPI 已内置校验错误的 schema（ValidationModel）。列在这里是为了让文档更醒目。" }
+    ],
+    "api_cards": [
+      {
+        "name": "路由装饰器的文档参数",
+        "signature": "@router.post(..., summary, description, response_model, status_code, responses, tags, deprecated=True)",
+        "kind": "api",
+        "summary": "把接口的可读契约一次声明完；deprecated=True 会在文档里划横线，比在 description 里写「别用了」有效。",
+        "params": [{ "name": "responses", "type": "dict[int, dict]", "note": "{409: {\"description\": ..., \"model\": ErrorDetail}}；model 只进 schema" }, { "name": "operation_id", "type": "str", "note": "前端生成客户端代码时它会变成方法名，值得显式取" }],
+        "returns": "装饰器",
+        "gotcha": "summary 与 description 也会被 OpenAPI 工具拿去生成 SDK 注释；乱写会一路传染到客户端代码里。"
+      }
+    ]
+  }
+}
